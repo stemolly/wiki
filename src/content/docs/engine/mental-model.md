@@ -3,8 +3,6 @@ title: Mental Model Design
 description: The three-layer student belief graph — misconceptions, fragility, and reasoning patterns — what each layer means, how beliefs are structured, and why the model is the core USP.
 ---
 
-# Mental Model Design
-
 Stemolly's core claim is that it can see *how a student thinks*, not just what answers they produce. That claim lives entirely in the **belief graph** — a persistent, per-student model built up over many sessions. The graph has three layers: **misconceptions** (specific wrong beliefs), **fragility** (how shallow correct answers actually are), and **reasoning patterns** (deep habits that cut across subjects). Together they let the Socratic AI ask the right question at the right moment, and they let the team observe exactly how a student's thinking evolves. Without persistence across sessions, none of this is possible — resetting the model each session would destroy the product's core value.
 
 ```mermaid

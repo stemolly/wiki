@@ -3,8 +3,6 @@ title: Backend & Persistence
 description: PostgreSQL as the single datastore, the in-process job runner, node-pg-migrate conventions, configuration, and Docker Compose topology.
 ---
 
-# Backend & Persistence
-
 Stemolly's infrastructure layer is deliberately minimal. A single PostgreSQL instance holds every kind of data — the concept graph, evidence events, projections, and job queues. An in-process worker loop driven by that same database handles async work. A thin migration runner (`node-pg-migrate`) keeps the schema in sync. And a strict environment-variable convention wires secrets and settings together at startup.
 
 This page explains what each piece does and — just as importantly — why the alternatives were rejected.

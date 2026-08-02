@@ -3,8 +3,6 @@ title: "LLM & Agent Layer"
 description: "How Stemolly orchestrates LLMs — the @noetaris/harness substrate, the Guide and Analyst two-agent tutor split, how they communicate through a versioned Report, and the tier-plus-purpose routing policy."
 ---
 
-# LLM & Agent Layer
-
 Stemolly is not tied to any single AI provider. The system uses multiple LLMs at once, each matched to its task: cheap, fast models handle high-volume conversational turns; powerful (and expensive) models do the reasoning work that fires much less often. No part of the codebase may assume a specific vendor — Claude, GPT, Gemini, or a local model are all swappable. The agents that drive the tutor experience sit on top of this interchangeable model layer.
 
 This page explains the substrate those agents are built on, the two-agent design at the heart of the tutor, how the agents talk to each other, and the operational decisions that keep the system testable, routable, and observable.

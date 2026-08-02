@@ -1,25 +1,23 @@
 ---
 title: Backend & Lưu trữ bền vững
-description: PostgreSQL là kho dữ liệu duy nhất, bộ chạy job trong tiến trình, các quy ước node-pg-migrate, cấu hình và topo Docker Compose.
+description: PostgreSQL là kho dữ liệu duy nhất, bộ chạy job trong tiến trình, các quy ước của node-pg-migrate, cấu hình và cấu trúc Docker Compose.
 ---
 
-# Backend & Lưu trữ bền vững
+Tầng hạ tầng của Stemolly được chủ ý giữ ở mức tối giản. Một thực thể PostgreSQL duy nhất lưu mọi loại dữ liệu — concept graph (đồ thị khái niệm), các sự kiện bằng chứng, projection (bản chiếu), và hàng đợi job. Một vòng lặp worker trong cùng tiến trình, cũng chạy dựa trên chính cơ sở dữ liệu đó, xử lý phần việc bất đồng bộ. Một migration runner (trình chạy migration) mỏng (`node-pg-migrate`) giữ cho schema luôn đồng bộ. Và một quy ước nghiêm ngặt về biến môi trường nối các bí mật và thiết lập lại với nhau ngay khi khởi động.
 
-Tầng hạ tầng của Stemolly được cố ý giữ ở mức tối giản. Một phiên bản PostgreSQL duy nhất chứa mọi loại dữ liệu — concept graph (đồ thị khái niệm), evidence events (sự kiện bằng chứng), projections (bản chiếu) và job queues (hàng đợi tác vụ). Một vòng lặp worker (tiến trình xử lý) trong cùng tiến trình, cũng được điều khiển bởi chính cơ sở dữ liệu đó, đảm nhiệm phần việc bất đồng bộ. Một bộ chạy migration (di trú lược đồ) mỏng (`node-pg-migrate`) giữ cho schema luôn đồng bộ. Và một quy ước biến môi trường chặt chẽ dùng để nối secrets (bí mật) và settings (thiết lập) với nhau ngay khi khởi động.
-
-Trang này giải thích từng mảnh ghép làm gì — và quan trọng không kém — vì sao các phương án khác đã bị loại bỏ.
+Trang này giải thích từng thành phần dùng để làm gì — và cũng quan trọng không kém — vì sao các phương án khác lại bị loại bỏ.
 
 ---
 
-## PostgreSQL là Datastore Duy nhất
+## PostgreSQL là Kho Dữ liệu Duy nhất
 
-Mọi đối tượng cần lưu bền đều nằm trong một phiên bản PostgreSQL: concept graph, nhật ký evidence và prediction (dự đoán) chỉ-ghi-thêm, belief projections (bản chiếu niềm tin), job queues, catalogs (danh mục) và dữ liệu metering (đo lường). Không có kho dữ liệu phụ.
+Mọi đối tượng cần lưu bền vững đều nằm trong một thực thể PostgreSQL: concept graph, các log bằng chứng và dự đoán chỉ ghi thêm, belief projection (bản chiếu niềm tin), hàng đợi job, catalog và dữ liệu metering. Không có kho dữ liệu phụ nào khác.
 
-**Vì sao không dùng graph database (cơ sở dữ liệu đồ thị)?** Concept graph (nodes, edges, taxonomy) được duyệt bằng [recursive CTEs (biểu thức bảng chung đệ quy)](https://www.postgresql.org/docs/current/queries-with.html) — cơ chế có sẵn của PostgreSQL để đi qua cấu trúc phân cấp. Các lượt duyệt ở đây đều nông (bao đóng prerequisite và taxonomy children). Phần khó của hệ thống — trạng thái của học sinh — có hình dạng giống event log (nhật ký sự kiện) kèm projections hơn là một đồ thị sâu. Thêm Neo4j sẽ đồng nghĩa với hai cơ sở dữ liệu phải sao lưu, hai ranh giới nhất quán cần phân tích, và một chi phí đổi hướng nếu yêu cầu thay đổi. Recursive CTEs trong PostgreSQL đã đáp ứng được nhu cầu đồ thị mà không tăng gánh nặng vận hành.
+**Vì sao không dùng graph database (cơ sở dữ liệu đồ thị)?** Concept graph (node, edge, taxonomy) được duyệt bằng [recursive CTEs](https://www.postgresql.org/docs/current/queries-with.html) (biểu thức bảng chung đệ quy) — cơ chế dựng sẵn của PostgreSQL để đi qua cấu trúc phân cấp. Ở đây các lượt duyệt đều nông (bao đóng prerequisite, các node con trong taxonomy). Phần khó của hệ thống — trạng thái của học sinh — lại có hình dạng của một event log (nhật ký sự kiện) với projection, chứ không phải một đồ thị sâu. Thêm Neo4j đồng nghĩa phải sao lưu hai cơ sở dữ liệu, suy luận về hai ranh giới nhất quán, và chấp nhận chi phí xoay trục nếu yêu cầu thay đổi. Recursive CTEs trong PostgreSQL đã đáp ứng được nhu cầu đồ thị mà không kéo theo thêm gánh nặng vận hành nào.
 
-**Vì sao không dùng dedicated event store (kho sự kiện chuyên dụng)?** Các bảng Postgres chỉ-ghi-thêm với tính bất biến được trigger (bộ kích hoạt) cưỡng chế mang lại đúng những ngữ nghĩa đó như một event store chuyên biệt. Một cơ sở dữ liệu duy nhất đồng nghĩa với một cách sao lưu duy nhất cho evidence log không thể thay thế, và tính toàn vẹn giao dịch giữa việc ghi thêm một event và cập nhật projection của nó có sẵn miễn phí.
+**Vì sao không dùng dedicated event store (kho sự kiện chuyên dụng)?** Các bảng Postgres chỉ ghi thêm, với tính bất biến được trigger cưỡng chế, cho ra đúng ngữ nghĩa của một event store chuyên biệt. Chỉ có một cơ sở dữ liệu nghĩa là chỉ có một cách sao lưu cho evidence log không thể thay thế, và tính toàn vẹn giao dịch giữa thao tác ghi thêm một event và cập nhật projection của nó thì có sẵn.
 
-**JSONB cho các payload (dữ liệu tải) hay thay đổi.** Những trường thường xuyên đổi hình dạng — thân event, payload cuộc gọi LLM, thân báo cáo, tên hiển thị i18n — được đặt trong các cột JSONB thay vì các cột quan hệ cứng nhắc. Cách này tránh phải tạo migration mỗi khi payload có thêm một trường mới.
+**JSONB cho các payload hay thay đổi.** Những trường thường xuyên đổi hình dạng — thân sự kiện, payload gọi LLM, thân báo cáo, display name i18n — được đặt trong các cột JSONB thay vì các cột quan hệ cứng nhắc. Nhờ đó không phải tạo migration mỗi khi payload có thêm một trường mới.
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -35,13 +33,13 @@ Mọi đối tượng cần lưu bền đều nằm trong một phiên bản Pos
 └─────────────────────────────────────────────────────┘
 ```
 
-Logic duyệt đồ thị được đóng gói bên trong graph repository (kho truy cập đồ thị) của engine. Nếu một mốc mở rộng trong tương lai buộc phải dùng một graph store chuyên dụng, chỉ repository đó cần thay đổi.
+Logic duyệt đồ thị được đóng gói bên trong graph repository (kho truy xuất đồ thị) của engine. Nếu sau này đến một mốc mở rộng buộc phải có graph store chuyên dụng, chỉ repository đó cần thay đổi.
 
 ---
 
-## Job Bất đồng bộ: Dựa trên Postgres, Không Có Broker
+## Job Bất đồng bộ: Dựa trên Postgres, Không có Broker
 
-Công việc bất đồng bộ — các checkpoint của Expert, các lô judge, pipeline nhập liệu, email mời — chạy trên một **vòng lặp worker trong tiến trình** lấy các hàng từ bảng jobs của Postgres bằng `SELECT … FOR UPDATE SKIP LOCKED`. Không Redis. Không message broker.
+Công việc bất đồng bộ — các checkpoint của Expert, các đợt judge, pipeline ingest, email mời — chạy trên một **in-process worker loop** (vòng lặp worker trong tiến trình) lấy hàng từ bảng job trong Postgres bằng `SELECT … FOR UPDATE SKIP LOCKED`. Không Redis. Không message broker.
 
 ```mermaid
 sequenceDiagram
@@ -57,25 +55,25 @@ sequenceDiagram
     end
 ```
 
-**Vì sao không dùng broker?** Độ sâu hàng đợi hiện tại chỉ ở mức vài chục job mỗi ngày — chưa hề chạm ngưỡng mà một message broker đáng để đầu tư. Bảng jobs thực chất chính là đường nối mà sau này broker có thể thay thế; thêm nó ngay bây giờ đồng nghĩa với hạ tầng mới, runbook vận hành mới và thêm một kiểu lỗi mới.
+**Vì sao không dùng broker?** Hiện tại độ sâu hàng đợi chỉ ở mức vài chục job mỗi ngày — còn rất xa ngưỡng mà message broker đáng để tự trả chi phí. Bảng job chính là đường nối mà sau này broker có thể thay thế; thêm nó từ bây giờ chỉ mang theo hạ tầng mới, runbook vận hành mới và một kiểu lỗi mới.
 
-**Độ bền có sẵn miễn phí.** Vì hàng job được chèn trong cùng một giao dịch cơ sở dữ liệu với dữ liệu mà nó mô tả, sẽ không có khoảng trống nào mà dữ liệu đã được commit nhưng job lại bị mất. Đây là outbox pattern (mẫu hộp thư ra) mà không cần thêm mã.
+**Độ bền có sẵn.** Vì dòng job được chèn ngay trong cùng giao dịch cơ sở dữ liệu với dữ liệu mà nó mô tả, sẽ không có khoảng hở nào mà dữ liệu đã commit nhưng job lại bị mất. Đây là outbox pattern (mẫu outbox) mà không cần thêm mã.
 
-**Phân phối at-least-once (ít nhất một lần).** Worker có thể bị crash giữa lúc đã nhận một job và lúc chưa xóa hàng của nó. Job đó sẽ được nhận lại ở nhịp kế tiếp. Vì vậy mọi handler ghi evidence đều phải **idempotent (lặp lại vẫn cho cùng kết quả)**: một idempotency key (khóa chống lặp) xác định cùng với ràng buộc `UNIQUE` sẽ khiến một job phát lại trở thành no-op (không làm gì), chứ không bao giờ ghi thêm hai lần.
+**At-least-once delivery (giao hàng ít nhất một lần).** Worker có thể sập sau khi nhận job nhưng trước khi xóa dòng của nó. Job đó sẽ được nhận lại ở nhịp kế tiếp. Vì vậy, mọi handler ghi evidence đều phải **idempotent** (an toàn khi chạy lặp): một idempotency key xác định cộng với ràng buộc `UNIQUE` sẽ biến job phát lại thành no-op, chứ không bao giờ ghi thêm hai lần.
 
-**Trần năng lực và đường mở rộng.** Thông lượng của một tiến trình duy nhất được chấp nhận ở quy mô cohort. Khi chạm trần, đường tách ra đã được xác định rõ: nâng vòng lặp trong tiến trình thành một worker process riêng, chỉ dùng chung bảng jobs. Đường nối đó đã sẵn có.
+**Giới hạn trần và đường mở rộng.** Ở quy mô cohort, thông lượng một tiến trình là chấp nhận được. Khi chạm trần, lộ trình tách ra đã được ghi rõ: nâng vòng lặp trong tiến trình thành một worker process riêng chỉ dùng chung bảng job. Ranh giới đó đã tồn tại sẵn.
 
 ---
 
-## Schema Migrations với node-pg-migrate
+## Migration Schema với node-pg-migrate
 
-### Vì sao là node-pg-migrate
+### Vì sao dùng node-pg-migrate
 
-Dự án dùng `node-pg-migrate` thay vì Prisma migrations hay Knex. Lý do là tính dễ đọc. Schema của Stemolly cần raw SQL triggers (trigger SQL thuần), recursive CTEs và các ràng buộc không theo chuẩn thông dụng. Những DSL migration nặng của ORM thường cản trở khi bạn cần các thứ đó; `node-pg-migrate` chạy chính xác câu SQL bạn viết mà không có lớp biên dịch trung gian.
+Dự án dùng `node-pg-migrate` thay vì migration của Prisma hay Knex. Lý do là tính dễ đọc. Schema của Stemolly cần trigger SQL thuần (để cưỡng chế append-only), recursive CTEs và các ràng buộc không chuẩn. Các DSL migration của ORM nặng thường cản trở khi bạn cần những thứ đó; `node-pg-migrate` chạy đúng đoạn SQL bạn viết, không qua lớp chuyển đổi nào.
 
-### Một Dòng thời gian, Một File cho Mỗi Module
+### Một Dòng thời gian, Một File cho mỗi Module
 
-Tất cả các file migration đều nằm dưới `server/migrations/` trong một dòng thời gian dùng chung theo thứ tự thời gian (đánh số bằng timestamp). Tuy nhiên, mỗi file chỉ được chạm vào schema của đúng **một module**. Mỗi file bắt đầu bằng `CREATE SCHEMA IF NOT EXISTS <module>;` rồi chỉ tạo các đối tượng bên trong schema của module đó. Một file tạo bảng trong schema khác là dấu hiệu cần xem xét khi review.
+Toàn bộ file migration nằm dưới `server/migrations/` trong một dòng thời gian dùng chung theo thứ tự thời gian (đánh số bằng timestamp). Tuy vậy, mỗi file chỉ đụng vào schema của đúng **một module**. File sẽ bắt đầu bằng `CREATE SCHEMA IF NOT EXISTS <module>;` rồi chỉ tạo đối tượng trong schema của module đó. Một file tạo bảng trong schema khác là dấu hiệu đáng bị soi khi review.
 
 ```
 server/migrations/
@@ -84,33 +82,33 @@ server/migrations/
   1720000002000_jobs-table.ts           ← touches jobs.* only
 ```
 
-### `makeAppendOnly()`
+### makeAppendOnly()
 
-Các bảng tuyệt đối không được cập nhật hay xóa (evidence events, predictions, nhật ký cuộc gọi LLM, guardrail events, transcript turns) sẽ gọi một helper dùng chung ngay trong migration đã tạo ra chúng:
+Các bảng tuyệt đối không được cập nhật hay xóa (evidence event, prediction, log cuộc gọi LLM, guardrail event, transcript turn) sẽ gọi một helper dùng chung ngay trong migration tạo ra chúng:
 
 ```ts
 makeAppendOnly(pgm, 'engine', 'evidence_events');
 ```
 
-Lệnh này cài một trigger `BEFORE UPDATE OR DELETE` trên bảng. Trigger được tạo trong chính file migration đã tạo bảng đó — không có bước "thêm trigger" riêng nào có thể bị quên.
+Lệnh này cài một trigger `BEFORE UPDATE OR DELETE` lên bảng. Trigger được tạo trong chính file migration tạo bảng đó — không có bước "thêm trigger" tách rời nào có thể bị quên.
 
-### Quy chuẩn quản trị Engine Schema
+### Cơ chế quản trị Schema của Engine
 
-Không phải schema nào cũng như nhau. Một file migration chạm vào `engine.*` phải được **nêu rõ ràng** trong phần mô tả pull request theo **checklist review schema G-4**: không để rò rỉ khái niệm miền nghiệp vụ, không có cột đặc thù sư phạm, không có tên nhà cung cấp, định danh node phải được giữ nguyên. Migration cho các schema khác (`metering`, `jobs`, v.v.) chỉ cần review thông thường.
+Không phải schema nào cũng như nhau. Một file migration đụng tới `engine.*` phải được **nêu rõ ràng** trong phần mô tả pull request theo **checklist review schema G-4**: không để rò rỉ khái niệm miền nghiệp vụ, không có cột gắn riêng với phương pháp sư phạm, không có tên nhà cung cấp, giữ nguyên danh tính của node. Migration cho các schema khác (`metering`, `jobs`, v.v.) chỉ cần review thông thường.
 
-Lý do của sự bất đối xứng này là: engine được thiết kế để không phụ thuộc miền. Chỉ cần một cột được thêm bất cẩn mà mã hóa một giả định về sư phạm là có thể âm thầm phá vỡ cam kết đó. Cửa kiểm tra bổ sung này tồn tại để chặn điều đó trước khi hợp nhất.
+Lý do của sự bất đối xứng này là: engine được thiết kế để không phụ thuộc miền nghiệp vụ. Chỉ một cột thêm vào một cách bất cẩn mà mã hóa giả định sư phạm cũng có thể âm thầm phá vỡ bảo đảm đó. Cổng review bổ sung tồn tại để chặn điều này trước khi nó được nhập vào.
 
 ---
 
-## Những bẫy thường gặp với Migration
+## Các bẫy thường gặp của Migration
 
-### Không Đăng ký tsx trong Một Tiến trình Sống Lâu
+### Không đăng ký tsx trong một tiến trình sống lâu
 
-Các file migration được viết bằng TypeScript. Đường chạy CLI truyền `--tsx` để xử lý việc này. Còn API `runner()` trong tiến trình (được test harness sử dụng) thì gọi `register()` của `tsx/esm`.
+Các file migration được viết bằng TypeScript. Đường chạy CLI cung cấp `--tsx` để xử lý việc đó. API `runner()` trong tiến trình (được test harness dùng) thì gọi `register()` của `tsx/esm` thay vào đó.
 
-Vấn đề là: `register()` cài các hook nạp mô-đun ESM/CJS trên **toàn bộ tiến trình và không bao giờ gỡ ra**. Trong một test worker sống ngắn, điều này vô hại — sau khi migration chạy xong gần như không còn gì quan trọng được nạp nữa. Nhưng trong một tiến trình sống lâu thì nó là chí mạng.
+Vấn đề là: `register()` cài các hook nạp module ESM/CJS trên **toàn bộ tiến trình và không bao giờ gỡ ra**. Trong một test worker sống ngắn, điều này vô hại — sau khi migration xong sẽ không còn gì đáng kể được nạp nữa. Nhưng trong một tiến trình sống lâu, nó là chí mạng.
 
-Điều này đã được tái hiện cụ thể trong bước thiết lập toàn cục của Playwright. Gọi `startPostgres()` (chạy migration trong tiến trình) thành công, nhưng ngay bước kế tiếp — dựng máy chủ Fastify — lại ném ra lỗi:
+Điều này đã được tái hiện cụ thể trong bước thiết lập toàn cục của Playwright. Gọi `startPostgres()` (vốn chạy migration ngay trong tiến trình) thì thành công, nhưng bước kế tiếp — dựng server Fastify — lại ném ra:
 
 ```
 TypeError: Expected a string, an ArrayBuffer, or a TypedArray to be returned
@@ -119,32 +117,32 @@ TypeError: Expected a string, an ArrayBuffer, or a TypedArray to be returned
 
 Hook `load` còn sót lại của tsx đã chặn một lệnh `require()` CommonJS thuần bên trong Fastify và không thể đáp ứng nó.
 
-**Quy tắc:** hãy chạy migration trong một **child process được spawn ra** (CLI của `node-pg-migrate` với `--tsx`) từ bên trong bất kỳ tiến trình sống lâu nào như thiết lập toàn cục của Playwright. Hãy giới hạn phần đăng ký của tsx trong child process sống ngắn đó. Helper `startPostgresForE2e()` trong `server/test/e2e-postgres-boot.ts` làm đúng như vậy.
+**Quy tắc:** hãy chạy migration trong một **child process được spawn ra** (CLI `node-pg-migrate` với `--tsx`) từ bên trong mọi tiến trình sống lâu như phần thiết lập toàn cục của Playwright. Giới hạn việc đăng ký của tsx vào tiến trình con sống ngắn đó. Helper `startPostgresForE2e()` trong `server/test/e2e-postgres-boot.ts` làm đúng việc này.
 
-### CLI và In-Process Runner Có Cấu hình Tách biệt
+### CLI và Runner trong tiến trình được cấu hình độc lập
 
-Script CLI và API `runner()` trong tiến trình không chia sẻ cấu hình với nhau. Có hai thiết lập phải được áp dụng **cho cả hai phía một cách độc lập**:
+Script CLI và API `runner()` trong tiến trình không chia sẻ cấu hình với nhau. Có hai thiết lập phải được áp dụng **cho cả hai bên một cách độc lập**:
 
-| Setting | Vì sao quan trọng |
+| Thiết lập | Vì sao quan trọng |
 |---|---|
 | `ignorePattern` (ví dụ `tsconfig\.json\|.*\.test\.ts`) | node-pg-migrate coi mọi tệp không bắt đầu bằng dấu chấm trong thư mục migrations là một migration. Nếu thiếu cấu hình này, một `tsconfig.json` trong thư mục đó sẽ làm hỏng cả lượt chạy. |
 | TypeScript loader (`--tsx` cho CLI, `register()` cho runner) | Các file migration import một helper `.ts` chưa biên dịch. Nếu không có loader, lệnh import sẽ thất bại. |
 
-Lỗi cấu hình ở một đường chạy có thể âm thầm không lộ ra ở đường còn lại. Thiếu `ignorePattern` trong runner chạy trong tiến trình có thể vẫn qua được các lần chạy CLI cục bộ nhưng hỏng ở CI — hoặc ngược lại. Hãy đặt cả hai thiết lập ở cả hai nơi.
+Một bên cấu hình sai sẽ không báo động ở bên còn lại. Thiếu `ignorePattern` trong runner trong tiến trình có thể vẫn qua được các lần chạy CLI cục bộ nhưng lại gãy trên CI — hoặc ngược lại. Hãy đặt cả hai thiết lập ở cả hai nơi.
 
-### Ưu tiên Bỏ qua `down()` — Hãy để Auto-Reverse Xử lý
+### Ưu tiên bỏ hẳn down() — để Auto-Reverse tự xử lý
 
-Khi không export hàm `down`, node-pg-migrate sẽ tự động đảo ngược migration bằng cách hoàn tác từng thao tác theo thứ tự ngược lại. Nếu export một `down()` tường minh, cơ chế suy luận này sẽ bị bỏ qua hoàn toàn — phiên bản viết tay sẽ được chạy nguyên văn.
+Khi không export hàm `down`, node-pg-migrate sẽ tự động đảo ngược migration bằng cách hoàn tác từng thao tác theo thứ tự ngược lại. Nếu export một `down()` tường minh, cơ chế suy luận này bị bỏ qua hoàn toàn — bản viết tay sẽ được chạy nguyên xi.
 
-Điều này từng gây ra lỗi thật. Một `down()` viết tay cho migration `metering.llm_calls` đã xóa bảng nhưng để sót lại hàm trigger độc lập (được `makeAppendOnly` tạo qua `pgm.createFunction`). Trigger sẽ chết cùng bảng của nó; còn một hàm độc lập là một đối tượng schema riêng nên vẫn tồn tại. Sau đó, một chu kỳ down → up tiếp theo thất bại với lỗi "function already exists".
+Điều này từng gây lỗi thật. Một `down()` viết tay cho migration `metering.llm_calls` đã xóa bảng nhưng để sót lại hàm trigger độc lập (được `makeAppendOnly` tạo qua `pgm.createFunction`). Trigger chết cùng bảng; còn một hàm độc lập là đối tượng schema riêng và vẫn tồn tại. Kết quả là chu kỳ down → up tiếp theo thất bại với lỗi "function already exists".
 
-Cách sửa là: xóa `down()` tường minh đó đi. Auto-reverse sẽ xóa trigger, hàm, bảng, extension và schema — theo đúng thứ tự ngược. Đồng thời, hãy gộp mọi lệnh `pgm.alterColumn` (vốn không có auto-reverse) vào ngay trong `createTable` ban đầu, vì chỉ một bước không thể đảo ngược cũng đủ buộc bạn phải viết `down()` tường minh cho toàn bộ migration.
+Cách sửa: xóa `down()` tường minh đó đi. Auto-reverse sẽ xóa trigger, hàm, bảng, extension và schema — theo đúng thứ tự ngược. Đồng thời, hãy gộp mọi lệnh `pgm.alterColumn` (vốn không có auto-reverse) vào ngay `createTable` ban đầu, vì chỉ một bước không thể đảo ngược cũng đủ buộc bạn phải viết `down()` tường minh cho cả migration.
 
-> **Tip:** Những migration tạo ra các đối tượng không tầm thường (function, trigger, extension) nên ưu tiên auto-reverse và đi kèm một bài kiểm tra hồi quy down → up.
+> **Tip:** Những migration tạo đối tượng không tầm thường (hàm, trigger, extension) nên ưu tiên auto-reverse và đi kèm một bài test hồi quy down → up.
 
 ---
 
-## Cấu hình: các biến môi trường `STEMOLLY_`
+## Cấu hình: Biến môi trường STEMOLLY_
 
 ### Quy ước đặt tên
 
@@ -154,45 +152,45 @@ Mọi biến môi trường đều theo mẫu `STEMOLLY_<AREA>_<NAME>` — ví d
 - `STEMOLLY_INVITE_TTL_HOURS`
 - `STEMOLLY_DB_URL`
 
-Tất cả biến đều chỉ được đọc ở đúng một nơi: module tổng hợp `config.ts`. Mã ứng dụng không bao giờ gọi `process.env` trực tiếp. Mỗi module tự kiểm tra phần cấu hình của mình bằng schema [Zod](https://zod.dev) ngay trong bộ tổng hợp đó.
+Tất cả biến đều chỉ được đọc ở đúng một chỗ: module tổng hợp `config.ts`. Mã ứng dụng không bao giờ gọi `process.env` trực tiếp. Mỗi module tự kiểm tra phần cấu hình của mình theo schema [Zod](https://zod.dev) riêng bên trong bộ tổng hợp đó.
 
-Các file `.env` chỉ dành cho phát triển cục bộ. Secrets không bao giờ được commit vào kho mã.
+Các file `.env` chỉ dành cho phát triển cục bộ. Bí mật không bao giờ được commit vào repository.
 
-Quy ước này được đưa ra để lấp một khoảng trống: ở giai đoạn kiến trúc, cấu hình và bí mật được xác định là một đường nối ("được bơm qua env; secrets nằm ngoài repo"), nhưng các quy tắc cụ thể lại để dành cho sau. Đây chính là phần "sau" đó đã tạo ra.
+Quy ước này được đưa vào để lấp một khoảng trống: giai đoạn kiến trúc đã nêu cấu hình và bí mật như một đường nối ("env-injected; secrets out of repo") nhưng để dành quy tắc cụ thể cho sau. Đây chính là bộ quy tắc mà phần "sau" đó tạo ra.
 
-### Các giá trị liên quan đến bảo mật: Có giới hạn + Có mặc định
+### Giá trị liên quan đến bảo mật: Có giới hạn + Có mặc định
 
-Khi một giá trị liên quan đến bảo mật — chẳng hạn TTL của invite token — trở nên có thể cấu hình, mẫu áp dụng là:
+Khi một giá trị có liên quan đến bảo mật — chẳng hạn TTL của invite token — trở thành tham số cấu hình, mẫu áp dụng là:
 
-1. **Biến môi trường có giới hạn và có mặc định.** `STEMOLLY_INVITE_TTL_HOURS`, kiểu số nguyên, dương, `max(168)`, `default(168)`. Quá trình khởi động sẽ thất bại nếu giá trị là 0, âm, không phải số hoặc vượt quá trần.
-2. **Kiểm tra sự hiện diện chỉ ở production.** Khi `NODE_ENV=production`, biến này bắt buộc phải được đặt tường minh. Đây là môi trường duy nhất mà việc tuyên bố chính sách đó thực sự quan trọng.
+1. **Biến môi trường có giới hạn và có mặc định.** `STEMOLLY_INVITE_TTL_HOURS`, số nguyên, dương, `max(168)`, `default(168)`. Khởi động sẽ thất bại nếu là 0, âm, không phải số hoặc vượt quá trần.
+2. **Kiểm tra bắt buộc chỉ ở production.** Khi `NODE_ENV=production`, biến đó phải được đặt một cách tường minh. Đây là môi trường duy nhất mà việc tuyên bố chính sách thực sự quan trọng.
 
-**Vì sao không bắt buộc biến này mà không có mặc định?** Mọi trường cấu hình khác đều có mặc định. Một biến bắt buộc đứng riêng lẻ sẽ buộc môi trường dev, test, CI và Compose đều phải tự đặt nó — và trên thực tế cùng một giá trị sẽ bị sao chép vào cả bốn nơi, tạo ra *cảm giác* như có một quyết định có chủ ý ở từng nơi, trong khi thực chất chỉ là một hằng số chưa được review bị rải mỏng khắp nơi. Điều bạn thật sự cần bảo vệ là một giá trị *sai*, và khoảng giá trị đã được kiểm tra ở trên giải quyết trực tiếp việc đó.
+**Vì sao không bắt buộc biến đó mà không có mặc định?** Mọi trường cấu hình khác đều có giá trị mặc định. Một biến bắt buộc đơn lẻ sẽ buộc môi trường dev, test, CI và Compose đều phải đặt nó — và trên thực tế cùng một giá trị sẽ bị copy-paste vào cả bốn nơi, tạo ra *bề ngoài* như thể mỗi nơi đã có một quyết định có chủ ý, trong khi thật ra chỉ là một hằng số chưa được review bị dàn mỏng khắp nơi. Điều bạn thật sự cần bảo vệ là một giá trị *sai*, và miền giá trị đã được kiểm tra sẽ xử lý thẳng vấn đề đó.
 
 Hai quy tắc hỗ trợ:
-- **Đặt đơn vị ngay trong tên**, bằng đơn vị dễ đọc ở nơi triển khai (giờ thay vì mili giây — để giá trị không biến thành cả một dãy số 0).
-- **Truyền giá trị đó vào hàm domain dưới dạng tham số**. Đừng đọc cấu hình bên trong tầng domain thuần; việc "làm cho nó có thể cấu hình" không được âm thầm kéo theo một lần đọc biến môi trường xuống sâu hơn một tầng.
+- **Đưa đơn vị vào trong tên**, theo đơn vị dễ đọc ở nơi triển khai (giờ thay vì mili giây — để giá trị không biến thành cả một dãy số 0).
+- **Truyền giá trị đó vào hàm miền nghiệp vụ dưới dạng tham số**. Đừng đọc cấu hình bên trong tầng miền thuần; yêu cầu "hãy cho nó cấu hình được" không được âm thầm đẩy một lệnh đọc biến môi trường xuống sâu hơn một tầng.
 
 ---
 
-## Topo Docker Compose
+## Cấu trúc Docker Compose
 
-Trong kho mã có hai tệp Compose. Chúng phục vụ hai mục đích khác nhau và phải được tách riêng.
+Trong repository có hai file Compose. Chúng phục vụ hai mục đích khác nhau và phải được tách riêng.
 
 | File | Mục đích | Cách chạy |
 |---|---|---|
-| `docker-compose.yml` | Bản **có thể triển khai**. Khởi động `web`, `server` và `postgres` với `restart: unless-stopped`. Chỉ cổng web được publish ra máy host. | `docker compose up` |
-| `compose.dev.yml` | Chỉ để **thuận tiện cho phát triển**. Khởi động Postgres để bạn có thể chạy `pnpm --filter server dev` cục bộ. | `docker compose -f compose.dev.yml up -d` |
+| `docker-compose.yml` | Bản **có thể triển khai**. Dựng `web`, `server` và `postgres` với `restart: unless-stopped`. Chỉ cổng web được publish ra máy host. | `docker compose up` |
+| `compose.dev.yml` | Chỉ để **tiện cho phát triển**. Khởi động Postgres để bạn có thể chạy `pnpm --filter server dev` cục bộ. | `docker compose -f compose.dev.yml up -d` |
 
-**Vì sao không đặt tên tệp dev là `docker-compose.override.yml`?** Compose sẽ tự động gộp bất kỳ tệp nào có đúng tên đó vào mọi lệnh `docker compose up`. Một lần `docker compose up` trên bản checkout sạch sẽ âm thầm kéo cả cấu hình dev vào, phá hỏng hoàn toàn mục tiêu của việc tách riêng hai tệp.
+**Vì sao không đặt tên file dev là `docker-compose.override.yml`?** Compose sẽ tự động gộp mọi file có đúng tên đó vào mỗi lần `docker compose up`. Khi đó, `docker compose up` trên một bản checkout sạch sẽ âm thầm kéo theo cấu hình dev, làm hỏng toàn bộ mục tiêu của việc tách riêng.
 
-Hai tệp dùng các tên Docker volume khác nhau (`stemolly-postgres-data` và `stemolly-dev-postgres-data`) để khi chạy cả hai từ cùng một thư mục sẽ không đụng nhau.
+Hai file dùng tên Docker volume khác nhau (`stemolly-postgres-data` và `stemolly-dev-postgres-data`) để nếu cùng chạy từ một thư mục thì cũng không va chạm.
 
-### Tự bạn phải đóng Pool
+### Tự bạn phải đóng pool
 
-`compose(config)` — composition root (điểm lắp ráp gốc) — tạo `pg.Pool` làm nền cho các module persistence và metering. **Không có gì ở phía dưới sở hữu pool này.** `buildServer()` nhận vào context đã được dựng sẵn và không chịu trách nhiệm cho nó. `app.close()` của Fastify chỉ tắt tầng HTTP, hoàn toàn không biết gì về một pool mà nó không tự tạo.
+`compose(config)` — composition root — tạo ra `pg.Pool` dùng chung cho các module persistence và metering. **Không có gì ở downstream sở hữu pool này.** `buildServer()` nhận vào ngữ cảnh đã dựng xong và không chịu trách nhiệm về nó. `app.close()` của Fastify chỉ đóng tầng HTTP, chứ không biết gì về một pool mà nó không tạo ra.
 
-Bất kỳ đoạn mã nào gọi `compose()` — integration test, thiết lập/kết thúc toàn cục của Playwright, hay một harness trong tương lai — **đều phải tự kết thúc pool một cách tường minh**:
+Bất kỳ đoạn mã nào gọi `compose()` — integration test, thiết lập/thu dọn toàn cục của Playwright, hay một harness trong tương lai — **đều phải tự kết thúc pool một cách tường minh**:
 
 ```ts
 await app.close();
@@ -200,6 +198,6 @@ await ctx.modules.persistence.pool.end();  // NOT implied by app.close()
 await db.stop();
 ```
 
-Nếu bỏ qua dòng ở giữa, các kết nối của pool sẽ tiếp tục treo sau cả khi container đã `stop()`, hoặc giữ tiến trình không thoát, hoặc tạo ra lỗi kết nối tới một cơ sở dữ liệu không còn tồn tại.
+Nếu bỏ dòng ở giữa, các kết nối của pool sẽ còn treo lại sau cả khi container đã `stop()`, hoặc giữ cho tiến trình không thoát, hoặc tạo ra lỗi kết nối tới một cơ sở dữ liệu không còn tồn tại.
 
-Quyền sở hữu này không lộ rõ ở nơi gọi — `app.close()` trông giống như đã tắt hoàn toàn, nhưng thực ra không phải. Hãy nói thật rõ điều này trong bất kỳ harness nào gọi `compose()`.
+Quyền sở hữu này không lộ ra ở chỗ gọi — `app.close()` trông như một thao tác tắt hoàn chỉnh nhưng thực ra không phải vậy. Hãy nói rõ điều này trong mọi harness có gọi `compose()`.

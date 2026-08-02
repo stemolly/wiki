@@ -3,8 +3,6 @@ title: API & Transport
 description: How the Stemolly API is designed — the flat POST turn route, plain request/response transport, strict ajv validation, and the error envelope contract.
 ---
 
-# API & Transport
-
 The Stemolly backend exposes a small HTTP API built on **Fastify**. Every student interaction goes through a single route. Responses are complete JSON bundles — no streaming. A strict validation contract ensures that every bad request, whether rejected by the framework or by the application, returns the same shaped error.
 
 ---

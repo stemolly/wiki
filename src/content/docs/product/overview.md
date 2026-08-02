@@ -3,8 +3,6 @@ title: Stemolly Overview
 description: What Stemolly is, how it models student knowledge as a belief graph, and why the architecture is built for cheap pivoting.
 ---
 
-# Stemolly Overview
-
 Stemolly is an AI-first web application that tutors students in any subject — K-12 math and science, languages, or exam prep like SAT and IELTS. The "any subject" scope is intentional: there is no hard subject boundary in the design. What makes Stemolly different from other learning tools is not the AI itself, but *how it models what a student knows* — and what it does with that model.
 
 ---

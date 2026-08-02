@@ -1,164 +1,192 @@
 ---
-title: Cấu trúc Module
-description: Cách mỗi module backend được phân lớp bên trong — domain/ports/adapters theo kiến trúc lục giác, quy tắc leaf-adapter, barrel file, cơ chế thực thi bằng dependency-cruiser và wiring tại composition root.
+title: Cấu trúc module
+description: Cách mỗi module backend được phân lớp nội bộ — `domain`, `ports`, `adapters`, barrel `index`, quy tắc leaf-adapter, cơ chế thực thi bằng dependency-cruiser và cách nối dây ở composition root.
 ---
 
-# Cấu trúc Module
+Mọi module backend (phía máy chủ) trong server đều có cùng một cấu trúc nội bộ. Logic nghiệp vụ nằm trong `domain/`, các interface phụ thuộc của nó được khai báo ở `ports.ts`, các phần hiện thực cụ thể (repo Postgres, harness binding) nằm trong `adapters/`, và một barrel `index.ts` là tệp duy nhất mà module khác được phép import. Đây là hexagonal architecture (kiến trúc lục giác), còn gọi là *ports and adapters* (cổng và bộ chuyển đổi), được áp dụng ở cấp module.
 
-Mọi backend module (mô-đun backend) trong server đều theo cùng một cấu trúc nội bộ. Business logic (logic nghiệp vụ) nằm trong `domain/`, các dependency interface (giao diện phụ thuộc) nằm trong `ports.ts`, các concrete implementation (triển khai cụ thể) — như database hay harness bindings — nằm trong `adapters/`, còn public surface (bề mặt API công khai) nằm trong `index.ts`. Đây là cách áp dụng hexagonal architecture (kiến trúc lục giác) ở cấp vi mô: mỗi module là một "hình lục giác" nhỏ riêng, với ranh giới rõ ràng giữa phần lõi định nghĩa hành vi và các adapter giao tiếp với hạ tầng.
-
-Cấu trúc này được thiết lập trong đợt làm nền móng backend-pattern-foundation, với các module `llm` và `metering` là ví dụ chạy được đầu tiên.
+Các quy tắc dưới đây không phải để tham khảo. Chúng được máy kiểm tra trong CI (tích hợp liên tục), và nếu muốn thay đổi một quan hệ import được phép thì phải có ADR.
 
 ---
 
-## Cấu trúc Chuẩn Gồm Bốn Phần
+## Cấu tạo của một module
+
+Đây là bố cục chuẩn cho một module có `domain/`, chẳng hạn như `engine` hoặc `llm`:
 
 ```
 server/src/<module>/
 ├── domain/          ← business logic: projections, rules, value objects
 ├── ports.ts         ← interfaces the core needs from infrastructure
-├── adapters/        ← concrete implementations (Postgres repos, harness calls, …)
-├── module.ts        ← orchestration / application wiring
+├── adapters/        ← concrete implementations (Postgres repos, harness bindings, …)
+├── module.ts        ← orchestration and application wiring
 └── index.ts         ← re-exports only — the module's public surface
 ```
 
-Mỗi phần có nhiệm vụ riêng rất rõ:
-
-- **`domain/`** chứa phần code thuần túy xoay quanh bài toán. Không gọi database, không HTTP, không I/O. Chỉ có hàm thuần và kiểu dữ liệu.
-- **`ports.ts`** khai báo các interface mà `domain/` và `module.ts` cần từ thế giới bên ngoài — như `LessonRepository`, `LlmGateway`, v.v. Có thể hình dung đây là ổ cắm để phần hạ tầng kết nối vào.
-- **`adapters/`** chứa các "phích cắm" đó — mỗi file ứng với một công nghệ cụ thể triển khai một port.
-- **`module.ts`** làm phần orchestration (điều phối): nhận các adapter đã được khởi tạo và nối dây sẵn, gọi các hàm trong `domain/`, rồi phối hợp công việc qua các port.
-- **`index.ts`** chỉ re-export API công khai của module. Không làm gì khác.
-
-Các edge module (mô-đun biên) có nhiệm vụ thuần túy là routing hoặc scheduling — `api` và `jobs` — được miễn rõ ràng khỏi việc phải có thư mục `domain/`, vì bản chất công việc của chúng là không chứa logic miền nghiệp vụ.
-
----
-
-## Quy tắc Chỉ Hướng Vào Trong
-
-Phần core (lõi) của một module — `domain/`, `ports.ts`, và `module.ts` — **không bao giờ được import từ `adapters/`** trong chính module đó. Adapter phải được khởi tạo ở nơi khác rồi inject vào; phần core không tự với tới chúng.
+Hãy hình dung module được chia làm hai vùng, ngăn cách bởi một ranh giới cứng:
 
 ```mermaid
-flowchart LR
-    subgraph core ["Core — never imports adapters"]
-        domain["domain/"]
-        ports["ports.ts"]
-        mod["module.ts"]
-    end
-    subgraph infra ["Infrastructure"]
-        adapters["adapters/"]
-        comp["composition.ts"]
+graph TB
+    subgraph mod ["Module"]
+        direction TB
+        subgraph core ["Core — inward side of the boundary"]
+            D["domain/"]
+            P["ports.ts"]
+            M["module.ts"]
+        end
+        A["adapters/"]
+        I["index.ts"]
     end
 
-    domain -->|"may import"| ports
-    mod -->|"imports"| domain
-    mod -->|"imports"| ports
-    adapters -->|"import type"| ports
-    comp -->|"constructs"| adapters
-    comp -->|"injects into"| mod
+    D -->|"may import"| P
+    M -->|"orchestrates"| D
+    M -->|"imports"| P
+    A -->|"implements interfaces from"| P
+    I -->|"re-exports"| M
+    I -->|"re-exports"| D
+
+    ext["Other modules"] -->|"only allowed import"| I
 ```
 
-Có một điểm cần nhấn mạnh: **`domain/` hoàn toàn có thể import `ports.ts`**. Ports là các interface do phần core định nghĩa — chúng nằm bên trong ranh giới của hình lục giác, không phải bên ngoài. Cấm `domain/ → ports.ts` là một biến thể chặt hơn có tên functional core / imperative shell (lõi hàm / vỏ mệnh lệnh); dự án này không chọn dạng chặt hơn đó.
+Mỗi phần có một vai trò rất rõ:
 
-Từ đây kéo theo một hệ quả quan trọng: các shared record type (kiểu bản ghi dùng chung), ví dụ shape của `Lesson`, được khai báo một lần trong `domain/` rồi `ports.ts` import ra ngoài. Nếu khai báo cùng một shape ở cả hai lớp, việc type-checking chỉ thành công nhờ structural equivalence (tương đương cấu trúc) của TypeScript — đó là sự trùng hợp chứ không phải một ràng buộc. Chỉ cần một bên thay đổi, sẽ không có gì phát hiện ra độ lệch.
-
----
-
-## Adapter Là Các Lá
-
-Nửa còn lại của bất biến này nói về việc một adapter được phép là gì. Một adapter phải là một **leaf (nút lá)**:
-
-1. Nó triển khai **chính xác một port**.
-2. Nó **không giữ bất kỳ port nào khác** như một dependency — không có field trong constructor mang kiểu `*Port`, `*Repository`, hay `*Store`.
-3. Nó **không chứa quyết định nào** mà có thể viết được mà không cần I/O. Nếu logic có thể biểu diễn bằng code thuần, thì nó thuộc về `domain/`.
-
-Phần orchestration — chẳng hạn gọi hai repository rồi gộp kết quả của chúng — thuộc về `module.ts`. Các rule (quy tắc) chi phối miền nghiệp vụ — như "không bao giờ hạ cấp một catalog item khi reseed" — thuộc về `domain/`. Nếu một adapter bắt đầu điều phối qua nhiều port, nó đang ôm lấy trách nhiệm vốn phải nằm trong core, và sẽ khó thay thế hơn khi hạ tầng thay đổi.
-
-Hai mệnh đề này — "core không bao giờ import adapter" và "adapter là lá" — được ghi lại cùng nhau trong ADR-023, vì nếu chỉ ghi mệnh đề đầu thì mệnh đề sau rất dễ lệch đi mà không ai nhận ra. Module `identity` tuân thủ cả hai và được dùng làm implementation tham chiếu.
+- **`domain/`** chứa phần mã chỉ nói về bài toán. Không gọi cơ sở dữ liệu, không HTTP, không I/O — chỉ có pure functions (hàm thuần) và kiểu dữ liệu.
+- **`ports.ts`** khai báo các interface mà `domain/` và `module.ts` cần từ thế giới bên ngoài — như `LessonRepository`, `LlmGateway`, v.v. Có thể hình dung nó như một ổ cắm để phần hạ tầng cắm vào.
+- **`adapters/`** chứa các đầu nối — mỗi tệp ứng với một công nghệ cụ thể hiện thực một port. Một adapter là một **leaf** (nút lá) — phần này sẽ nói kỹ hơn ở dưới.
+- **`module.ts`** làm nhiệm vụ điều phối: nhận các adapter đã được dựng sẵn, gọi các hàm trong `domain/`, rồi phối hợp qua nhiều port.
+- **`index.ts`** chỉ re-export API công khai. Không hơn.
 
 ---
 
-## Barrel File: Chỉ Dùng Để Re-Export
+## Ranh giới giữa core và adapter
 
-Mọi `index.ts` đều là một **barrel (file tổng hợp re-export)** — tức file chỉ re-export từ các file cùng cấp. Không khai báo schema, không định nghĩa class, không viết factory function trực tiếp trong đó. Toàn bộ implementation thực sự phải nằm trong các file `.ts` riêng, rồi `index.ts` chỉ việc re-export lại.
+**Core — gồm `domain/`, `ports.ts`, và `module.ts` — tuyệt đối không được import từ `adapters/` trong cùng module.** Adapter được khởi tạo trong `composition.ts` rồi inject (tiêm phụ thuộc) vào; core không tự với tới chúng.
+
+Đó là mệnh đề đầu tiên của ADR-023. Điều này quan trọng vì chiều phụ thuộc quyết định bên nào kiểm soát bên nào. Adapter phụ thuộc vào các port interface do *core* định nghĩa; nếu core import adapter thì mũi tên phụ thuộc bị đảo chiều, và core sẽ bị ràng buộc vào hạ tầng.
+
+Có một điểm cần nói rõ: **`domain/` được phép import `ports.ts` một cách tự do**. Port là interface do chính core định nghĩa — chúng nằm bên trong ranh giới của hình lục giác, chứ không ở bên ngoài. Nếu cấm `domain/ → ports.ts` thì đó sẽ là một mẫu kiến trúc khác, gọi là *functional core / imperative shell* (lõi hàm / vỏ mệnh lệnh), và dự án này không chọn hướng đó.
+
+Hệ quả thứ hai là các kiểu record dùng chung — ví dụ cấu trúc `Lesson` — chỉ được khai báo một lần trong `domain/`, rồi để `ports.ts` import ra ngoài. Nếu khai báo cùng một cấu trúc ở cả hai lớp, type-checker (bộ kiểm tra kiểu) chỉ tình cờ thấy chúng tương thích nhờ TypeScript dùng structural typing (định kiểu theo cấu trúc). Chỉ cần một bên thay đổi là sự lệch nhau ấy sẽ không có gì bắt được.
+
+:::caution[Một sai lầm cũ cần biết]
+Một rule `dependency-cruiser` thời kỳ đầu có tên `domain-no-adapters-import` chỉ mã hóa một phiên bản hẹp của quy tắc này: mệnh đề `from` của nó chỉ giới hạn trong `domain/`, nên một tệp ở gốc module như `module.ts` vẫn có thể import adapter của chính nó mà mọi cổng kiểm tra vẫn xanh. Module `identity` từng làm đúng như vậy trước khi rule được mở rộng để bao trùm toàn bộ core — `domain/`, `ports.ts`, và `module.ts`.
+:::
+
+---
+
+## Adapter là các nút lá
+
+Mệnh đề thứ hai của ADR-023 nói về việc một adapter được phép *là gì*. Một adapter phải là một **leaf**:
+
+1. Nó hiện thực **đúng một port**.
+2. Nó **không giữ thêm bất kỳ port nào khác** như một phụ thuộc constructor — tức không có field nào mang kiểu `*Port`, `*Repository`, hoặc `*Store`.
+3. Nó **không chứa quyết định nào** có thể viết mà không cần I/O. Nếu logic có thể diễn đạt bằng mã thuần, nó phải nằm trong `domain/`.
+
+Việc điều phối — ví dụ gọi hai repository rồi hợp nhất kết quả — thuộc về `module.ts`. Các quy tắc nghiệp vụ — chẳng hạn "không bao giờ hạ cấp một mục catalog khi reseed" — thuộc về `domain/`. Một adapter mà bắt đầu phối hợp qua nhiều port sẽ hấp thụ trách nhiệm đáng lẽ phải ở trong core, và cũng khó thay thế hơn khi công nghệ bên dưới thay đổi.
+
+Hai mệnh đề này được ghi chung trong ADR-023 vì nếu chỉ ghi mệnh đề đầu tiên thì mệnh đề thứ hai rất dễ trôi đi mà không ai nhận ra. Module `engine` tuân thủ mệnh đề 1 nhưng vi phạm mệnh đề 2. Module `metering` thì ngược lại — nó import adapter của chính nó vào `module.ts`. Hiện nay module `identity` đáp ứng cả hai mệnh đề và được nêu đích danh làm cách hiện thực tham chiếu cho các đợt review sau này.
+
+---
+
+## `index.ts` chỉ dùng làm barrel
+
+Mọi `index.ts` đều là một **barrel** (tệp gom tái xuất) — tức một tệp chỉ re-export từ các tệp cùng cấp. Không được định nghĩa inline schema, class hay factory function.
 
 ```ts
-// ✅ Correct: index.ts re-exports only
+// ✅ Correct — index.ts re-exports only
 export { createLlmGateway } from './llm-gateway';
 export type { LlmPort } from './ports';
 
-// ❌ Wrong: implementation inline in index.ts
+// ❌ Wrong — implementation defined directly in index.ts
 export function createLlmGateway(deps: Deps): LlmPort {
-  return { … };
+  // ...
 }
 ```
 
-Quy tắc này được mã hóa thành chuẩn sau khi phát hiện một số module — gồm `contracts`, `errors`, `logger`, `persistence`, `metering`, và `llm` — đang đặt logic thật trực tiếp trong `index.ts`. Riêng entry point tiến trình `server/src/index.ts` và các stub placeholder rỗng được miễn trừ rõ ràng.
+Quy tắc này được thêm vào sau khi một đợt review Sprint 1 phát hiện nhiều module — trong đó có `contracts`, `errors`, `logger`, `persistence`, `metering`, và `llm` — đang đặt logic thật trực tiếp trong các tệp `index.ts`. Riêng điểm vào tiến trình `server/src/index.ts` và các stub rỗng dùng làm chỗ giữ chỗ thì được miễn trừ rõ ràng.
 
 ---
 
-## Dependency-Cruiser: Kiến trúc Có Thể Đọc Được Bằng Máy
+## Composition root: factory tường minh, không dùng DI container
 
-File `app/.dependency-cruiser.cjs` chính là **module architecture (kiến trúc module) có thể đọc được bằng máy**. Nó mã hóa đồ thị import liên module được phép (ví dụ `tutor → engine, content, pedagogy, llm`; `engine → nothing`) cùng bốn nhóm quy tắc:
-
-| Rule | Nội dung nó thực thi |
-|------|----------------------|
-| `engine-no-upward-deps` | Phần lõi domain không được import gì từ các module điều phối/biên |
-| `declared-edges-only` | Một module chỉ được import từ các module nằm trong danh sách cạnh được phép của nó |
-| `no-deep-cross-module-imports` | Một module chỉ được truy cập thông qua `index.ts` của nó |
-| `domain-no-adapters-import` | `domain/` của một module không được import `adapters/` của chính nó |
-
-Vì file cấu hình này **chính là** kiến trúc, nên bất kỳ PR nào thay đổi một cạnh được phép đều mặc nhiên là thay đổi kiến trúc và phải dẫn chiếu tới một ADR. Cổng kiểm tra này chạy trong CI với tên `depcruise:check`, và đã được chứng minh là hoạt động thật bằng cách cố tình kích hoạt từng kiểu vi phạm quy tắc trong một lần chạy thử.
-
-### Điều dependency-cruiser không nhìn thấy được
-
-Dependency-cruiser suy luận ở mức độ chi tiết của file import. Mọi adapter trong một module đều import `ports.ts` một cách hợp lệ — đúng ra chúng phải làm vậy. Vi phạm quy tắc leaf-adapter tồn tại ở mức symbol (ký hiệu): một adapter giữ hai field có kiểu là port nhưng chỉ import cùng một file `ports.ts` thì trông vẫn hoàn toàn sạch dưới góc nhìn của dependency-cruiser. Trong ba issue liên tiếp, một lần chạy `depcruise` thành công đã bị xem như bằng chứng rằng ranh giới module vẫn khỏe mạnh, trong khi thực tế công cụ đó không bao giờ có khả năng phát hiện đúng lỗi ấy.
-
-Đó là lý do quy tắc leaf-adapter cần một cơ chế thực thi riêng.
-
----
-
-## Thực Thi Quy tắc Leaf: G-21
-
-Fitness function (hàm đo độ phù hợp kiến trúc) **G-21** là một quy tắc ESLint `no-restricted-syntax` được áp dụng cho `server/src/*/adapters/**/*.ts`. Nó đánh dấu mọi class property, constructor parameter property, hoặc field trong dependency interface có tên kiểu kết thúc bằng `Port`, `Repository`, hoặc `Store`.
+Khi bootstrap (khởi động) server, mọi module được nối dây thủ công tại một composition root, bằng cách gọi các factory function tường minh:
 
 ```ts
-// G-21 flags this in an adapter class:
-constructor(
-  private readonly lessonRepo: LessonRepository,  // ❌ holds a port
-  private readonly catalog: CatalogPort,           // ❌ holds a port
-) {}
-
-// This is fine — implementing a port is allowed:
-class PostgresLessonRepository implements LessonRepository { … } // ✅
-```
-
-G-21 có một blind spot (điểm mù) đã được nêu rõ: nó dựa vào quy ước đặt tên. Một kiểu port nếu được đặt tên mà không dùng một trong ba hậu tố (`Port`, `Repository`, `Store`) thì công cụ sẽ không nhìn thấy. Vì thế, quy ước đặt tên ở đây là thứ **gánh tải thực sự** cho cơ chế này — nó khiến quy tắc hoạt động được — chứ không phải sở thích mang tính thẩm mỹ.
-
----
-
-## Composition Root: Factory Tường Minh, Không Dùng DI Container
-
-Quá trình bootstrap của server nối dây mọi module với nhau thủ công trong một composition root, bằng cách gọi các factory function tường minh:
-
-```ts
-// composition.ts (sketch)
+// composition.ts (simplified)
 const pool = createPool(config.db);
 const llm = createLlmGateway({ httpClient });
 const metering = createMeteringModule({ db: pool });
 const engine = createEngineModule({ llm, metering, db: pool });
 ```
 
-Không decorator, không reflection, không auto-wiring. Mỗi factory — `createLlmGateway(deps)`, `createMeteringModule(deps)` — chỉ là một hàm thường: nhận dependencies của nó và trả về API công khai của module.
+Không dùng decorator, không reflection, không auto-wiring. Mỗi factory — `createLlmGateway(deps)`, `createMeteringModule(deps)` — chỉ là một hàm thường: nhận dependencies của nó rồi trả về API công khai của module.
 
-Đây là một lựa chọn có chủ đích: DI container sẽ che giấu đồ thị phụ thuộc vào bên trong metadata, đúng chỗ mà kỷ luật ranh giới của modular monolith cần phải nhìn thấy nó rõ nhất. Cùng lối nghĩ "ưu tiên tường minh hơn phép thuật" này đã dẫn đến hai quyết định trước đó — dùng harness tự xây thay vì LangChain, và dùng Fastify thay vì Next.js — nên phần này tiếp tục nhất quán với nguyên tắc chung của toàn dự án.
+Đây là một lựa chọn có chủ đích: DI container (bộ chứa tiêm phụ thuộc) che giấu dependency graph (đồ thị phụ thuộc) vào trong metadata, đúng chỗ mà kỷ luật ranh giới của modular monolith (nguyên khối mô-đun) lại cần nó phải hiện ra rõ ràng. Cùng một nguyên tắc "tường minh hơn phép màu" trước đó đã dẫn tới việc chọn harness nội bộ thay vì LangChain, và chọn Fastify thay vì Next.js — composition root chỉ tiếp tục đi theo đúng mẫu nhất quán đó.
 
 ---
 
-## Ghi chú về Module `persistence`
+## Ranh giới được thực thi như thế nào
 
-Module `persistence` không đi theo cấu trúc bốn phần ở trên. Bộ khung `domain/`, `ports.ts`, và `adapters/` của nó đã bị xóa trong Sprint 3. Toàn bộ nhiệm vụ của module này chỉ là tạo một `pg.Pool` rồi chuyển nó cho các module khác; không ai chỉ ra được công việc tương lai nào có thể khiến `persistence/domain/` thật sự có nội dung.
+Có hai công cụ cùng làm việc này. Chúng hoạt động ở các mức hạt khác nhau và bao phủ những khía cạnh khác nhau.
 
-Bộ khung ban đầu có một comment stub: *"intentionally empty until a later issue adds real business rules."* Comment đó là một lời hứa sai — nó khiến mọi người đọc sau này chờ đợi thứ sẽ không bao giờ xuất hiện. Xóa nó đi là xóa luôn sự đánh lạc hướng đó. Hiện tại module chỉ còn `pool.ts` và một `index.ts` chỉ làm re-export.
+### dependency-cruiser — ranh giới ở cấp tệp (G-1)
 
-**Đây không phải tiền lệ chung.** Hiện vẫn có khoảng ba mươi stub placeholder trải trên mười module khác — `engine`, `content`, `pedagogy`, `tutor`, và các module khác — và ở những chỗ đó, comment stub là đúng: code thật của chúng sẽ xuất hiện ở các sprint sau, nên các stub vẫn được giữ lại. Việc xóa bộ khung của `persistence` là một lần dọn dẹp cá biệt cho riêng một module, không phải thay đổi chính sách.
+`app/.dependency-cruiser.cjs` là **kiến trúc module ở dạng máy đọc được**. Theo định nghĩa, một PR thay đổi quan hệ cho phép trong tệp này là một thay đổi kiến trúc, nên phải dẫn chiếu tới một ADR (quy tắc quản trị G-11). Tệp này được chạy trong CI dưới tên `depcruise:check`.
+
+Các rule liên quan đến cấu trúc module gồm:
+
+| Rule | Rule kiểm tra gì |
+|------|-------------------|
+| `engine-no-upward-deps` | Domain core không import gì từ orchestration hay các edge module (R-1) |
+| `declared-edges-only` | Một module chỉ được import từ các module nằm trong danh sách cạnh cho phép của nó |
+| `no-deep-cross-module-imports` | Chỉ có thể đi vào một module thông qua `index.ts` của nó (R-3) |
+| `domain-no-adapters-import` | Toàn bộ core của module không import `adapters/` của chính nó |
+
+### ESLint — kiểm tra leaf ở cấp symbol (G-21)
+
+`dependency-cruiser` hoạt động ở mức độ chi tiết của file import. Nó không thể phát hiện vi phạm leaf-adapter: mọi adapter đều import cùng một tệp `ports.ts` một cách hợp lệ, nên với công cụ này, một adapter giữ hai field có kiểu là port vẫn trông hoàn toàn sạch. Chỉ khi nhìn vào các *symbol* mà một class giữ làm phụ thuộc constructor thì vi phạm mới lộ ra — và trong ba issue liên tiếp, một lần chạy `depcruise` sạch đã bị hiểu nhầm là bằng chứng cho thấy ranh giới vẫn khỏe mạnh, dù trên thực tế công cụ đó không bao giờ có khả năng phát hiện lỗi này.
+
+Fitness function (hàm đánh giá kiến trúc) **G-21** lấp chỗ trống đó. Đây là một rule ESLint `no-restricted-syntax`, được áp dụng cho `server/src/*/adapters/**/*.ts`, nhằm gắn cờ mọi class property, constructor parameter, hoặc field trong dependency interface có tên kiểu kết thúc bằng `Port`, `Repository`, hoặc `Store`. Việc hiện thực một port thì được phép — điều không được phép là *giữ* một port như phụ thuộc.
+
+```ts
+// G-21 flags this:
+constructor(
+  private readonly lessonRepo: LessonRepository, // ❌ holds a port
+  private readonly catalog: CatalogPort,          // ❌ holds a port
+) {}
+
+// G-21 permits this:
+class PostgresLessonRepo implements LessonRepository { … } // ✅
+```
+
+:::note[Điểm mù đã được nêu rõ của G-21]
+G-21 dựa vào hậu tố tên `Port` / `Repository` / `Store`. Một kiểu port có tên không kết thúc bằng một trong ba hậu tố đó sẽ vô hình với rule này. Quy ước đặt tên ở đây là **thành phần chịu tải**, không phải chuyện hình thức — nếu bạn thêm một port interface mới, tên của nó bắt buộc phải kết thúc bằng một trong các hậu tố ấy thì rule mới bao phủ được.
+:::
+
+---
+
+## Khi một module không có thư mục `domain/`
+
+Không phải module nào cũng cần một bộ khung hexagonal đầy đủ. **Các module thuần adapter — `api`, `jobs`, và `persistence` — không có thư mục `domain/`.** Vai trò của chúng là kết nối, không phải suy luận.
+
+`persistence` là ví dụ rõ nhất. Toàn bộ công việc của nó chỉ là khởi tạo một `pg.Pool` rồi đưa nó cho các module khác. Trong Sprint 3, bộ khung ban đầu gồm `persistence/domain/`, `persistence/ports.ts`, và `persistence/adapters/` đã bị xóa. Không ai có thể chỉ ra loại công việc nào rồi sẽ thực sự lấp đầy phần đó. Dòng chú thích stub *"intentionally empty until a later issue adds real business rules"* là một lời hứa sai — nó bảo mọi người đọc sau này hãy chờ một thứ vốn dĩ chẳng bao giờ tới. Giờ đây module này chỉ còn `pool.ts` và một barrel `index.ts`.
+
+**Đây không phải một tiền lệ chung.** Hiện vẫn có khoảng ba mươi stub giữ chỗ rải khắp các module như `engine`, `content`, `pedagogy`, và `tutor`. Với những chỗ đó, stub thực sự là phần đất dành sẵn cho mã sẽ đến trong các sprint sau — chú thích là đúng, nên stub vẫn được giữ lại.
+
+---
+
+## Quy ước: dẫn chiếu rule đặt trong docblock, không đặt trong thông báo lỗi
+
+Khi bạn viết một điểm `throw` để thực thi quy tắc cấu trúc module, hãy đưa *nội dung* của quy tắc vào thông báo, còn *mã định danh* của quy tắc thì để trong docblock (khối chú thích tài liệu) phía trên đoạn mã.
+
+```ts
+// ✅ Correct
+/**
+ * @see ADR-023 — core must not import adapters
+ */
+throw new Error('dependency must be injected, not imported directly');
+
+// ❌ Wrong
+throw new Error('ADR-023: dependency must be injected, not imported directly');
+```
+
+Một định danh như `ADR-023` khi xuất hiện trong log hoặc API response sẽ đi tới operator hay một service gọi sang — mà cả hai đều không cầm sẵn tài liệu đó. Hơn nữa, định danh ấy còn có thể mục rữa âm thầm: ADR vốn được thiết kế để có thể bị thay thế, nên một dẫn chiếu nhúng sẵn cuối cùng có thể trỏ tới một quyết định không còn hiệu lực, và sẽ chẳng có bài test nào phát hiện ra độ lệch ấy. Hãy để phần giải thích có thể hành động được nằm trong thông báo; còn dẫn chiếu thì đặt ở chỗ các maintainer thực sự đọc.

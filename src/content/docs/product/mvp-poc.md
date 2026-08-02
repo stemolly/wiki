@@ -1,11 +1,9 @@
 ---
 title: MVP Scope & PoC
-description: What MVP-1 ships (Student app, Console, Lesson mode, Math K11 + Language IELTS), and the Engine-Validation PoC that runs one real student through Claude-as-tutor ahead of the app UI track.
+description: What MVP-1 ships (Student app, Console, Lesson mode, K11 Math and IELTS Language) and how an Engine-Validation PoC with Claude over an append-only MCP proves the belief-graph engine before the full app is built.
 ---
 
-# MVP Scope & PoC
-
-MVP-1 has two parts that run in sequence. First, an **Engine-Validation PoC** uses Claude directly — no app UI, one real student — to prove that the belief-graph engine works before any significant UI investment. Second, the **MVP-1 app** (Student app + Console) ships Lesson mode for Vietnamese K11 Math and IELTS Language. This page explains both parts: what is in scope, why those choices were made, and how the PoC is built to leave no throwaway waste.
+MVP-1 is Stemolly's first shipped product — but before building the full app, the team runs an **Engine-Validation PoC** with one real student. The PoC proves the belief-graph engine is worth the investment; only then does the app get built. This page covers both: what MVP-1 will ship, and how the PoC gets there first.
 
 ---
 
@@ -45,7 +43,7 @@ The strong claim MVP-1 pursues is that **one engine produces a useful mental gra
 
 ### Why the PoC runs first
 
-The only load-bearing bet in MVP-1 is the belief-graph engine. Building the full Student SPA, auth, and Console before knowing whether the engine produces valid signals would be expensive and risky. So MVP-1 runs a PoC first: **one real student, Claude as the entire conversational front-end, the engine deployed to a VPS**. No Student SPA. No auth. No Console.
+The only load-bearing bet in MVP-1 is the belief-graph engine. Building the full Student SPA, auth, and Console before knowing whether the engine produces valid signals would be expensive and risky. So MVP-1 runs a PoC first: **one real student uses the product for assignment help** (Math first, then Physics), delivered through **Claude skills** talking to the engine over an MCP, with the engine deployed to a VPS. No Student SPA. No auth. No Console.
 
 The PoC is deliberately called a PoC — not "MVP-0" — to keep one thing explicit: **the shell is disposable, the engine data is not.** The app UI track is deferred behind the PoC, not cancelled.
 
@@ -57,15 +55,15 @@ Inside the PoC, Claude hosts both tutor roles:
 Student message
       │
       ▼
- ┌──────────┐    MCP (tutoring tool-set)    ┌────────────┐
- │  Guide   │ ─────────────────────────────▶ │   Engine   │
- │  (skill) │ ◀─────────────── Report ────── │  (Postgres)│
+ ┌──────────┐    MCP (student surface)       ┌────────────┐
+ │  Guide   │ ─────────────────────────────> │   Engine   │
+ │  (skill) │ <────────── Report ──────────  │  (Postgres)│
  └────┬─────┘                                └────────────┘
       │  invokes subagent at checkpoint
       ▼
- ┌──────────┐    MCP (tutoring tool-set)
- │ Analyst  │ ──── append_evidence ──────────▶  Engine
- │ (skill)  │ ──── propose_candidate ─────────▶  Engine
+ ┌──────────┐    MCP (student surface)
+ │ Analyst  │ ──── append_evidence ──────────>  Engine
+ │ (skill)  │ ──── propose_catalog_candidate >  Engine
  └──────────┘
 ```
 
@@ -96,31 +94,55 @@ Why batch-per-checkpoint rather than per-event? The fragility fold needs to net 
 
 Projections will be materialized only if the log grows large enough to make read-time folding slow — which one student never will.
 
-### Two tool-sets, not two deployments
+### Serializing tool results: guard the output, not the input
+
+Every tool result in the MCP adapter passes through one shared wrapper before it goes over the wire. That wrapper must guard the serialized output — not the handler's return value — and the reason is subtle.
+
+`JSON.stringify` returns the *value* `undefined` (not a string) when given `undefined`, a function, or a `Symbol`. It **never throws** for any of them, so a `try/catch` around the call sees nothing wrong. Any code that then assumes a string came back will emit a malformed reply and the error will appear to originate elsewhere.
+
+The obvious fix — `JSON.stringify(result ?? null)` — guards against a handler returning nothing, which is the most common reported bug. But it leaves the class open: a function or a `Symbol` passes the `??` check untouched and still serializes to `undefined`. The correct defence guards **what came out**:
+
+```js
+// ✗ guards only the "nothing returned" case
+const body = JSON.stringify(result ?? null);
+
+// ✓ covers every value JSON.stringify turns into undefined
+const body = JSON.stringify(result) ?? 'null';
+```
+
+The fallback is the JSON literal `"null"` — parseable by the client and honest: it means "no value", rather than inventing one.
+
+In the PoC this rule lives in the single wrapper that every registered tool's result flows through, so it holds automatically for any tool added later, not just for `append_evidence` today. The broader lesson generalises beyond this adapter: **a serializer that signals failure by returning a value rather than throwing defeats exception-based error handling.** The check must sit on the output, because nothing on the input side announces the problem.
+
+### Two MCP surfaces: student and operator
 
 The student session must not hold seed or approve tools. Not for security reasons — the PoC runs in a trusted environment with no auth — but to protect the **"AI drafts, human approves" gate**. If the tutoring Claude held an `approve_candidate` tool it would eventually fire it, promoting a draft node to trusted without human review. No replay fixes that, because promotion is a trust state, not an appended event.
 
-The solution is **configuration, not auth**: two MCP tool-sets over the *same* engine ports.
+The solution is **configuration-time, not auth**: two MCP surfaces over the *same* engine ports.
+
+The MCP process reads an `MCP_ROLE` environment variable **once at startup** and registers exactly one surface's tool map on the MCP server. The unselected surface's tools are never registered at all — they are absent from tool discovery entirely, not merely refused on call.
+
+| Surface | Tools exposed |
+|---|---|
+| **student** | `append_evidence`, `propose_catalog_candidate`, `get_belief_state`, `match_catalog` |
+| **operator** | `approve_candidate`, `seed_node`, `seed_edge`, `seed_catalog`, `get_belief_state`, `match_catalog` |
+
+An unrecognized or missing `MCP_ROLE` makes the process **refuse to boot** — fail-closed by construction. There is no code path that produces a running server with an unintended tool map.
+
+The deployment is two processes from one image, differing only by environment variable, both connected to the same database.
 
 ```mermaid
-graph TD
-    A["Operator Claude (seed skill)"] -->|"operator tool-set"| E["Engine ports"]
-    B["Tutoring Claude (Guide + Analyst)"] -->|"tutoring tool-set"| E
-    E --> P[("Postgres")]
-
-    subgraph "Operator tool-set"
-        O1["seed_nodes / seed_edges"]
-        O2["approve_candidate"]
-    end
-
-    subgraph "Tutoring tool-set"
-        T1["get_belief_state / match_catalog"]
-        T2["append_evidence"]
-        T3["propose_candidate"]
-    end
+graph LR
+    Operator["Operator Claude<br/>(seed skill)"] -->|"operator surface"| E["Engine ports"]
+    Guide["Tutoring Claude<br/>(Guide + Analyst)"] -->|"student surface"| E
+    E --> PG[("Postgres")]
 ```
 
-Which surface a Claude invocation connects to determines which tools it can call. Seeding happens before the student starts a topic; candidate approvals happen between sessions — so the approve tools never need to appear on the tutoring surface.
+:::note[Trust boundary]
+The role is enforced by configuration and the transport is stdio — so the trust boundary is **whoever spawns the process**. This holds for the PoC, where the tutoring skill spawns its own student-surface process. It would not hold over a shared network transport serving many clients from one server, which would need real authentication. The app enforces the same Console-vs-Student split with real auth — this PoC design does not block that.
+:::
+
+Seeding happens before the student starts a topic; candidate approvals happen between sessions — so the approve tools never need to appear on the student surface.
 
 ### Content seeding: operator seeds, AI drafts, human approves
 

@@ -1,114 +1,167 @@
 ---
-title: Triển khai Engine
-description: Cách belief graph được hiện thực về mặt kỹ thuật — evidence log dạng append-only, phân tách CQRS, ba projector, và các bất biến thiết kế giúp hệ thống có thể replay lại và vẫn đúng.
+title: Triển khai engine
+description: Cách Stemolly suy ra trạng thái niềm tin của học sinh — append-only event sourcing (ghi nhận theo chuỗi sự kiện chỉ thêm vào), tách CQRS, schema của evidence (bằng chứng), ba projector với các promotion gate, và những khoảng trống còn bỏ ngỏ.
 ---
 
-# Triển khai Engine
-
-Engine của Stemolly suy ra `belief state` (trạng thái niềm tin) của học sinh — các `misconception` (ngộ nhận) mà các em đang có, mức độ mong manh trong hiểu biết, và những `reasoning pattern` (mẫu thói quen suy luận) mà các em thể hiện — từ một bản ghi quan sát vĩnh viễn theo kiểu `append-only` (chỉ cho phép ghi nối thêm). Không có niềm tin nào được ghi trực tiếp; mọi niềm tin đều được *tính ra* từ bản ghi đó. Trang này giải thích toàn bộ luồng tính toán ấy: `log` cung cấp đầu vào, ba `projector` (bộ chiếu) tạo nên từng lớp niềm tin, các bất biến mà chúng phải tuân thủ, và những khoảng trống đã biết vẫn còn bỏ ngỏ.
+Engine của Stemolly suy ra **belief state** (trạng thái niềm tin) của một học sinh — các em đang giữ những **misconception** (ngộ nhận) nào, mức độ hiểu biết của các em mong manh đến đâu, các em bộc lộ những **reasoning habit** (thói quen lập luận) nào — từ một hồ sơ quan sát vĩnh viễn, dạng **append-only** (chỉ thêm vào). Không có belief nào từng được ghi trực tiếp; mọi belief đều được *tính ra* từ hồ sơ đó. Trang này giải thích cơ chế ấy: log nuôi toàn bộ hệ thống, schema định hình nó, ba **projector** (bộ chiếu suy diễn) tạo ra từng lớp belief, và những khoảng trống còn phải lấp.
 
 ---
 
-## Kiến trúc trong một hình
+## Kiến trúc: CQRS trên một Append-Only Log
 
-Engine đi theo mô hình `event-sourcing-lite` (biến thể gọn của event sourcing). Chỉ dữ liệu quan sát học sinh mới được `event-sourced` (lưu theo chuỗi sự kiện); còn nội dung, định danh và phiên làm việc dùng CRUD thông thường. Tính chất cốt lõi là **`evidence log` (nhật ký bằng chứng) là nguồn sự thật duy nhất**, còn toàn bộ `belief state` là một `projection` (phép chiếu) tất định, có thể dựng lại từ nó.
+Engine đi theo mô hình `event-sourcing-lite`. Chỉ dữ liệu quan sát học sinh là được event-sourced; còn content, identity, và session dùng CRUD thông thường. Tính chất trung tâm ở đây là: **evidence log là nguồn chân lý duy nhất, và toàn bộ belief state là một phép chiếu xác định, có thể dựng lại từ log đó.**
 
 ```mermaid
 flowchart LR
-    A["LLM Analyst<br/>(per-observation judgment)"] -->|"append typed event"| B[("evidence_events<br/>(append-only)")]
-    B --> C["Projection Runtime<br/>(replay fold)"]
-    C --> D["Fragility Projector"]
-    C --> E["Misconception Projector"]
-    C --> F["Pattern Projector"]
-    D & E & F --> G["belief_projections<br/>(read model)"]
-    H["API / MCP"] -->|"read"| G
-    H -->|"write command"| A
+    LLM["LLM Analyst<br/>(per-observation judgment)"] -->|"append typed event"| LOG[("evidence_events<br/>(append-only)")]
+    LOG --> RT["Projection Runtime<br/>(replay fold)"]
+    RT --> FP["Fragility<br/>Projector"]
+    RT --> MP["Misconception<br/>Projector"]
+    RT --> PP["Pattern<br/>Projector"]
+    FP & MP & PP --> BP["belief_projections<br/>(read model)"]
+    MCP["API / MCP"] -->|"read"| BP
+    MCP -->|"write command"| LLM
 
-    style B fill:#fef3c7,stroke:#d97706
-    style G fill:#dbeafe,stroke:#2563eb
+    style LOG fill:#fef3c7,stroke:#d97706
+    style BP fill:#dbeafe,stroke:#2563eb
 ```
 
-**Phía lệnh** (`graph`, `catalog`, `evidence`) kiểm tra hợp lệ rồi ghi nối thêm các quan sát có kiểu. **Phía truy vấn/suy diễn** (`projections/`) `replay` (phát lại) các quan sát đó thành `belief state`. Hai phía này **không bao giờ gọi trực tiếp lẫn nhau** — chúng chỉ gặp nhau qua `log` đã được lưu bền vững. Chính sự tách biệt chặt chẽ này khiến quy trình `truncate → replay → identical state` lành mạnh: nếu đường ghi thêm và đường suy diễn có thể gọi lẫn nhau, một lần `replay` sẽ lệch khỏi lần chạy trực tiếp ban đầu.
+Trong `domain/` của engine, hệ thống được tách thành **command side** (phía lệnh) gồm `graph`, `catalog`, `evidence` — nơi xác thực và ghi thêm các quan sát có kiểu — và **derive side** (phía suy diễn) gồm `projections/` — nơi replay log thành belief state. Hai phía này **không bao giờ gọi trực tiếp lẫn nhau**. Chúng chỉ gặp nhau qua append-only log đã được lưu bền vững.
 
-Đổi lại, hệ thống có khả năng tiến hóa. Khi mô hình niềm tin hóa ra sai — và với một công cụ mới thì đây mới là trường hợp *được kỳ vọng* — mã `projection` được viết lại rồi `replay` trên dữ liệu cohort đã bảo toàn, thay vì làm mất chúng. Sai thì vẫn rẻ. `Replay` `log` là một thao tác được hỗ trợ và có kiểm thử.
+Chính sự tách biệt này làm cho quy trình `truncate → replay → identical state` trở nên đáng tin. Nếu đường ghi và đường suy diễn có thể gọi lẫn nhau, replay sẽ lệch khỏi lần chạy thật ban đầu, và log sẽ không còn là nguồn chân lý duy nhất nữa.
 
----
-
-## Evidence Log
-
-### Envelope và Payload
-
-Mỗi `evidence event` được chia thành hai vùng với mức độ đảo ngược trái ngược nhau (ADR-021).
-
-| Vùng | Dạng | Khả năng đảo ngược | Quy tắc |
-|------|------|---------------|------|
-| **Envelope** | Các cột có kiểu trên bảng `append-only` | Cửa một chiều — lược đồ của bảng `append-only` không thể thay đổi và các dòng cũ không thể mọc thêm cột | Chỉ chứa những trường mà `fold` **dùng để khóa hoặc tính trọng số**, hoặc mà truy vấn kiểm toán **cần `join`** |
-| **Payload** | Cột JSONB | Có thể đảo ngược — mã `projection` mới có thể diễn giải lại `payload` cũ khi `replay` | Mọi thứ còn lại |
-
-Kinh nghiệm thực hành là: **"khi phân vân, hãy để vào payload."** Các cột `envelope` là: `student`, `node`, `type`, `scaffold_stamp`, `checkpoint_id`, `session`, `brief_snapshot`, `ts`, và `idempotency_key`. Cách này dồn toàn bộ phần không thể đảo ngược vào một tập nhỏ, có chủ ý, đồng thời giữ cho các chi tiết dễ thay đổi vẫn có chi phí sai thấp — đặc biệt quan trọng vì đây là cánh cửa một chiều trên dữ liệu thật, không thể thay thế, của học sinh.
-
-### Ba loại Event
-
-Trường `type` của evidence chỉ có đúng ba giá trị. Mỗi giá trị đều gọi tên **một quan sát về tư duy**, chứ không phải một hành động sư phạm:
-
-- **`misconception_evidence`** — payload: `catalogRef`, `polarity: for|against`, `confidence`, `excerpt`. Ghi lại: "Tôi đã thấy bằng chứng cho niềm tin sai này."
-- **`probe_outcome`** — payload: `outcome: correct|incorrect|partial`, `confidence`, `excerpt`. Ghi lại liệu sự hiểu có đứng vững khi bị kiểm tra hay không.
-- **`pattern_evidence`** — payload: `patternRef`, `confidence`, `excerpt`. Ghi lại một thói quen suy luận đang được thể hiện.
-
-Ba loại này ánh xạ một-một với ba `projector`. Chúng đã được kiểm chứng bằng tám ca kèm cặp đối kháng trong Toán (Socratic) và Ngôn ngữ (Correct/Reinforce) mà không cần đến loại thứ tư nào.
-
-Các `type` này **không bao giờ được** gọi tên cơ chế sư phạm (`socratic_hint`, `correction_issued`) hay chi tiết theo miền. Nếu làm vậy, một cách dạy học cụ thể sẽ bị đóng cứng vào dữ liệu vĩnh viễn, không thể `replay`, và phá vỡ tính trung lập của engine đối với miền lẫn phương pháp sư phạm. Nội dung theo miền nằm hoàn toàn trong `catalogRef`/`patternRef` và `payload`.
-
-### Quy tắc Altitude
-
-Có một ranh giới rõ giữa thứ LLM ghi ra và thứ engine tính ra.
-
-- **LLM ghi**: một phán đoán trên từng quan sát — quyết định ngữ nghĩa về một khoảnh khắc ("Ở đây tôi thấy bằng chứng cho misconception X, độ tin cậy cao").
-- **Engine suy ra**: trạng thái xuyên qua nhiều quan sát — phần ghi sổ cơ học của kích hoạt, độ mong manh và lan truyền trên nhiều phán đoán như thế.
-
-Mỗi event phải là một **sự kiện tự thân đầy đủ** tham chiếu đến các ID catalog ổn định, chứ không phải đến `belief state` tại thời điểm ghi. Analyst có thể *đọc* `belief state` hiện tại để lấy ngữ cảnh (ví dụ: quyết định rằng một lời giải sạch là bằng chứng phản bác có ý nghĩa), nhưng *không bao giờ được phát lại chính trạng thái đã lưu đó thành event*. Nếu bắn lại một niềm tin ở mọi checkpoint, hệ thống sẽ đếm đôi bằng chứng, làm phình `log`, và ghi lại một kết luận thay vì một quan sát.
-
-Quy tắc này được cưỡng chế ở ranh giới ghi. Bộ kiểm tra evidence từ chối mọi `payload` chứa tên trường của `belief state` (`fragility`, `mastery`, `activation`, `beliefState`, `misconceptionState`, `stability`). Một `allowlist` đầy đủ cho từng loại `payload` đã từng được cân nhắc rồi bị loại bỏ — hiện chưa có consumer nào cố định chính xác `payload` hợp lệ phải chứa gì, nên đóng băng lược đồ vào lúc hiểu biết còn ít nhất là quá sớm. `Denylist` chặn đúng rủi ro cụ thể (từ vựng của chính `fold` rò ngược về đầu vào của nó) mà không khóa hệ thống vào một hình dạng nhất định.
-
-### Gom nhóm lần làm: `checkpoint_id`
-
-Nhiều event có thể cùng mô tả một lần học sinh làm bài. Chẳng hạn, một lần tự sửa có thể sinh ra cả `misconception_evidence(for)` lẫn `probe_outcome(correct)`. Các `belief fold` phải gom các event của cùng một lần làm trước khi diễn giải chúng, vì câu chuyện tổng thể mới là thứ quan trọng:
-
-- **Cùng checkpoint**: `for` + `correct` → lảo đảo nhưng hồi lại → tín hiệu dương yếu, khái niệm vẫn còn mong manh.
-- **Khác checkpoint**: `for` ở một lần làm, `correct` ở lần sau → thật sự đã tiến bộ qua các lần làm.
-
-`session_id` thì quá rộng (một phiên có nhiều lần làm); còn độ gần về thời gian không có ranh giới sạch. `checkpoint_id` là một cột `envelope` đóng dấu batch do một lần chạy Analyst tạo ra — tức một lần học sinh làm bài — theo đúng cấu trúc. Phía suy diễn xử lý các checkpoint theo thứ tự `(min event ts, checkpoint_id)` để giữ cho `replay` mang tính tất định.
-
-### Idempotency Key — Từ theo-vị-trí sang theo-phạm-vi-định-danh (ADR-022)
-
-Ràng buộc duy nhất ban đầu là `(checkpoint_job_id, segment, observation_index)`. Nó có một lỗi tinh vi: `observation_index` là vị trí trong một thứ tự theo định danh ngữ nghĩa. Chỉ cần chèn hoặc xóa một quan sát là mọi chỉ số phía sau đều bị dịch. Khi chạy lại cùng một job nhưng thay đổi một quan sát, `ON CONFLICT DO NOTHING` sẽ giữ lại dòng đã có và âm thầm bỏ qua dòng mới, hoặc nhân đôi một dòng khác — mà không trả ra lỗi nào.
-
-Vì `evidence_events` là `append-only` nhờ trigger trong cơ sở dữ liệu, một dòng bị mất hay bị trùng đều không bao giờ sửa lại được — chỉ có thể bị lấn át bởi bằng chứng về sau. Mọi lần dựng lại đều sẽ `replay` đúng trạng thái đã bị hỏng đó.
-
-**ADR-022** (phương án giải quyết) thay ràng buộc trên bằng `(checkpoint_id, segment, node_id, type, ref, occurrence)`. `occurrence` được neo trong chính nhóm định danh của nó, nên một quan sát mới chèn vào chỉ mở nhóm riêng ở vị trí 0 chứ không làm dịch khóa của dòng nào khác. `ref` (`catalogRef` hoặc `patternRef`) được nâng từ `payload` JSONB thành một cột text nullable riêng để có thể tham gia ràng buộc. `observation_index` được giải phóng khỏi vai trò định danh và giờ chỉ còn ghi thứ tự phát ra thực sự của quan sát, điều vốn quan trọng với `misconception fold` (xem bên dưới).
-
-Ràng buộc được neo theo **checkpoint**, không phải theo job, vì checkpoint mới là đơn vị mà các `belief fold` coi là nguyên tử. Một lần chạy lại dưới job ID mới giờ sẽ va chạm đúng chỗ thay vì nhân đôi cả batch.
+Đổi lại, hệ thống có khả năng tiến hóa. Khi mô hình belief hóa ra sai — điều *được chờ đợi* ở một công cụ mới — ta viết lại projection code rồi replay trên dữ liệu cohort đã được giữ lại, thay vì đánh mất nó. Sai không quá đắt. Replay log là một thao tác được hỗ trợ và đã có kiểm thử.
 
 ---
 
-## Ba Projector
+## Schema của Evidence
 
-Mỗi `projector` là một `fold` tất định trên dòng event đã được gom theo checkpoint. Cả ba đều có thể đảo ngược: viết lại mã, `replay` `log`, nhận về `belief state` mới. Các núm hiệu chỉnh (`k`, `m`, `d`, ngưỡng) được để mở để tinh chỉnh trên dữ liệu thật.
+### Envelope và Payload: Gom phần bất khả đảo ngược vào một chỗ
 
-### Fragility: Tính nhất quán theo thời gian
+Mỗi evidence event được chia thành hai vùng có tính đảo ngược đối nghịch nhau (ADR-021).
+
+| Vùng | Dạng | Tính đảo ngược | Nội dung nên nằm ở đây |
+|------|------|----------------|-------------------------|
+| **Envelope** | Các cột có kiểu trên bảng append-only | Cánh cửa một chiều — schema không thể đổi và các dòng cũ không thể mọc thêm cột | Những trường mà fold **dựa vào để khóa hoặc gán trọng số**, hoặc các truy vấn audit **cần join vào** |
+| **Payload** | Cột JSONB | Có thể đảo ngược — projection code mới có thể diễn giải lại payload cũ khi replay | Mọi thứ còn lại |
+
+Kinh nghiệm áp dụng là: **"nếu còn phân vân, hãy để vào payload."** Các cột envelope gồm `student`, `node_id`, `type`, `scaffold_stamp`, `checkpoint_id`, `session`, `brief_snapshot`, `ts`, `seq`, và các cột của idempotency key. Cách này dồn toàn bộ phần bất khả đảo ngược vào một tập nhỏ được cân nhắc kỹ — đặc biệt quan trọng vì đây là cánh cửa một chiều trên dữ liệu thật, không thể thay thế của một học sinh.
+
+### Ba loại quan sát
+
+Trường `type` chỉ có đúng ba giá trị. Mỗi giá trị đều gọi tên **một quan sát về tư duy**, chứ không phải một hành động sư phạm hay khái niệm miền nội dung:
+
+- **`misconception_evidence`** — `catalogRef`, `polarity: for|against`, `confidence`, `excerpt`. Ghi lại "Tôi thấy bằng chứng cho niềm tin sai này."
+- **`probe_outcome`** — `outcome: correct|incorrect|partial`, `confidence`, `excerpt`. Ghi lại việc sự hiểu biết có đứng vững dưới kiểm tra hay không.
+- **`pattern_evidence`** — `patternRef`, `confidence`, `excerpt`. Ghi lại một thói quen lập luận đang bộc lộ.
+
+Ba loại này khớp một-một với ba projector. Chúng đã được kiểm chứng bằng tám ca tutoring mang tính đối kháng trong Math (Socratic) và Language (Correct/Reinforce); không cần loại thứ tư.
+
+Các type này tuyệt đối không được gọi tên cơ chế sư phạm (`socratic_hint`, `correction_issued`) hay chi tiết miền nội dung. Nếu làm vậy, một mode giảng dạy sẽ bị đóng cứng vào dữ liệu vĩnh viễn, không thể replay. Nội dung miền phải nằm trọn trong `catalogRef`/`patternRef` và payload.
+
+### Quy tắc về độ cao trừu tượng: LLM ghi gì, engine suy ra gì
+
+Có một ranh giới rất rõ giữa phần LLM ghi và phần engine tính:
+
+- **LLM ghi** một **per-observation judgment** (đánh giá ở cấp từng quan sát) — một phán đoán ngữ nghĩa về đúng một khoảnh khắc: "Ở đây tôi thấy bằng chứng cho misconception X, độ tin cậy cao."
+- **Engine suy ra** **cross-observation state** (trạng thái xuyên nhiều quan sát) — phần ghi sổ cơ học của activation, fragility, và propagation trên nhiều phán đoán như vậy.
+
+Chỉ lưu raw text là không đủ (engine không thể chạy một LLM). Còn ghi trực tiếp belief state thì lại phá vỡ bất biến append-only. Mỗi event phải là một **sự kiện tự thân đầy đủ** trỏ tới các catalog ID ổn định, chứ không phải belief state ở thời điểm ghi.
+
+Analyst có thể *đọc* belief state hiện tại như ngữ cảnh — chẳng hạn để nhận ra rằng một lời giải sạch là bằng chứng phủ định có ý nghĩa — nhưng tuyệt đối *không được phát lại chính trạng thái đã lưu ấy dưới dạng event*. Nếu lại bắn ra cùng một belief ở mỗi checkpoint, hệ thống sẽ đếm trùng bằng chứng, làm phình log, và ghi một kết luận thay vì một quan sát. Bất kỳ "conclusion" event nào mà ý nghĩa của nó phụ thuộc vào belief state tại lúc ghi đều làm hỏng replay và phải bị loại bỏ.
+
+**Thực thi ở ranh giới ghi:** evidence validator bác mọi payload có chứa tên trường của belief state (`fragility`, `mastery`, `activation`, `beliefState`, `misconceptionState`, `stability`). Từng có phương án dùng allowlist đầy đủ cho payload theo từng type, nhưng đã bị loại bỏ — chưa có consumer nào chốt rõ payload hợp lệ thật sự gồm những gì, nên đóng băng schema vào thời điểm hiểu biết còn ít nhất là quá sớm. Denylist chặn đúng rủi ro cụ thể mà chưa ép hệ thống vào một shape cố định.
+
+:::caution[Vẫn còn một trần chắn]
+Một trường của belief state dưới *một tên chưa nằm trong danh sách* vẫn có thể lọt qua. Denylist phải luôn được cập nhật. Về sau nên xem lại để chuyển sang allowlist khi đã có consumer thật sự chốt payload hợp lệ gồm những gì.
+:::
+
+### Gom các lần thử: `checkpoint_id`
+
+Nhiều event có thể cùng mô tả một lần học sinh thử làm bài. Ví dụ, một lần tự sửa sai sẽ tạo ra cả `misconception_evidence(for)` lẫn `probe_outcome(correct)`. Các belief fold phải gom những event cùng một lần thử trước khi diễn giải chúng, vì câu chuyện sẽ khác nhau tùy chúng thuộc checkpoint nào:
+
+- **Cùng checkpoint:** `for` + `correct` → chao đảo nhưng hồi lại → weak-positive, concept vẫn fragile.
+- **Khác checkpoint:** `for` ở một lần thử, `correct` ở lần sau → cải thiện thật sự qua nhiều lần thử.
+
+`session_id` thì quá rộng (một session có thể có nhiều lần thử); còn độ gần nhau về timestamp thì không có ranh giới sạch. `checkpoint_id` là một cột envelope đóng dấu cho batch được tạo ra bởi một lần chạy Analyst — tức một lần học sinh thử làm — ngay từ cấu trúc. Phía suy diễn xử lý các checkpoint theo thứ tự `(min event ts, checkpoint_id)` để giữ replay có tính xác định.
+
+---
+
+## Idempotency Key: Một câu chuyện còn tiếp diễn
+
+Khóa duy nhất trên `evidence_events` đã trải qua ba vòng thiết kế, mỗi vòng đều sửa một lỗi toàn vẹn dữ liệu có thật trên bảng append-only, nơi sai lầm là vĩnh viễn.
+
+### Vấn đề của positional key
+
+Ràng buộc ban đầu là `(checkpoint_job_id, segment, observation_index)`. `observation_index` là vị trí trong một thứ tự sắp xếp theo danh tính ngữ nghĩa. Chỉ cần chèn hoặc bỏ một quan sát, mọi index phía sau đều bị lệch. Khi chạy lại cùng job nhưng tập quan sát đã đổi, `ON CONFLICT DO NOTHING` sẽ giữ lại dòng đang chiếm chỗ trong DB và âm thầm bỏ dòng mới — hoặc nhân đôi một dòng khác — mà không trả lỗi và cũng không ai kiểm tra số dòng. Batch trông như thành công trong khi log đã hỏng.
+
+### ADR-022: Các khóa mang phạm vi theo danh tính
+
+Bản sửa thay ràng buộc dựa theo vị trí bằng `(checkpoint_id, segment, node_id, type, ref, occurrence)`.
+
+- `occurrence` có phạm vi riêng trong từng nhóm danh tính, nên thêm hay bớt một quan sát chỉ mở hoặc đóng nhóm của chính nó, không đẩy lệch khóa của dòng nào khác.
+- `ref` (`catalogRef` hoặc `patternRef`) được nâng từ JSONB thành một cột nullable riêng để có thể tham gia vào ràng buộc.
+- Ràng buộc được neo theo **checkpoint**, không phải theo job — checkpoint mới là đơn vị mà các fold xem là nguyên tử.
+
+`observation_index` được giải phóng khỏi vai trò định danh — đổi tên thành `occurrence` như bộ đếm trong từng nhóm danh tính — và một cột `seq` mới được thêm riêng để mang thứ tự phát ra thực sự.
+
+### ADR-026: Student ID là cột dẫn đầu
+
+Khóa ở ADR-022 đã bỏ sót `student_id`. Nếu hai học sinh tạo ra cùng một shape quan sát dưới cùng `checkpoint_id`, chúng sẽ va vào nhau — một dòng được lưu, một dòng bị bỏ, lời gọi vẫn báo thành công, còn phần mất mát thì không thể phát hiện cũng không thể sửa. Điều này đã được xác minh trên Postgres 16 thật.
+
+Phía đọc vốn dĩ luôn được scope theo học sinh (`WHERE student_id = $1`), rồi chỉ nhóm theo checkpoint bên trong tập đó. Chỉ riêng ràng buộc phía ghi mới đối xử `checkpoint_id` như một định danh toàn cục. Sự bất đối xứng ấy trong cùng một module đã không bị nhận ra vì lỗi chỉ xuất hiện khi có hơn một học sinh.
+
+**ADR-026** thêm `student_id` làm cột đầu tiên trong khóa. Ràng buộc đầy đủ hiện là:
+
+```
+UNIQUE (student_id, checkpoint_id, segment, node_id, type, ref, occurrence) NULLS NOT DISTINCT
+```
+
+Điều duy nhất các fold cần là tính duy nhất của `checkpoint_id` trong phạm vi từng học sinh. Tính duy nhất xuyên học sinh vốn là một lời hứa mạnh hơn mức bất kỳ phần nào cần, mà cũng chẳng có phần nào thực thi.
+
+### `NULLS NOT DISTINCT` cho các cột nullable
+
+`node_id` và `ref` đều là nullable. Trong SQL chuẩn, `NULL = NULL` cho ra `UNKNOWN`, không phải `TRUE`, nên một ràng buộc `UNIQUE` thông thường sẽ xem hai dòng có NULL ở cùng cột khóa là *khác nhau* và không bao giờ khử trùng. Với `UNIQUE` thường, mỗi lần retry một checkpoint sẽ nhân đôi mọi event `probe_outcome` — loại event vốn có thể hợp lệ khi không mang `ref` — một cách vĩnh viễn trên bảng append-only, khiến fragility fold bị nhân đôi trọng số.
+
+`UNIQUE NULLS NOT DISTINCT` (Postgres 15+) so sánh theo ngữ nghĩa `IS NOT DISTINCT FROM`, nên hai giá trị NULL được tính là bằng nhau. Trong miền bài toán này, `ref = NULL` nghĩa là "loại quan sát này không có ref" — một sự thật xác định, chứ không phải một giá trị chưa biết — nên đây là một bản sửa đúng về mặt ngữ nghĩa, không phải mẹo lách.
+
+### Thứ tự phát ra: Một cột `seq` chuyên dụng
+
+Truy vấn đọc cho projection ban đầu dùng `ORDER BY ts, id`. Nó xử lý được lỗ hổng về tính xác định của replay (các lần đọc lặp lại giờ cho cùng kết quả), nhưng lại không sắp theo đúng thứ tự quan sát thật. `ts` được điền từ `now()` tại lúc insert — giống hệt nhau cho mọi dòng trong một câu lệnh `appendCheckpointBatch` — nên việc sắp xếp rốt cuộc rơi xuống UUID ngẫu nhiên. Fold trở nên xác định đối với một thứ tự *tùy tiện*: một hoán vị ngẫu nhiên bị đóng băng ở lúc insert, và sai vĩnh viễn.
+
+Điều này quan trọng vì misconception fold nhạy với thứ tự (xem phần dưới). Một misconception `active` gặp chuỗi `[for, against, against]` thì sẽ được giải quyết; cùng các event đó nhưng dưới dạng `[against, against, for]` thì vẫn để nó ở `active`.
+
+Bản sửa thêm cột `seq bigserial NOT NULL`. Postgres tự gán `seq` từ sequence của nó — tăng đơn điệu trên toàn bảng, không cần gì từ phía gọi. Truy vấn đọc cho projection giờ chỉ sắp theo `seq`.
+
+`seq` **cố ý không nằm trong bộ khóa duy nhất**. Nhờ vậy retry idempotency và ordering mới tương thích: một lần retry phải tái tạo cùng identity key để va vào dòng cũ, còn bộ đếm do DB gán thì không bao giờ tái tạo lại. Các khoảng hở trong giá trị `seq` là điều bình thường (retry dở dang vẫn tiêu thụ số sequence cho các dòng bị bỏ) và vô hại — `seq` dùng để sắp thứ tự, không dùng để định danh.
+
+:::note[Nguyên tắc tổng quát]
+Một sort key ổn định và một sort key có ý nghĩa là hai yêu cầu khác nhau. Thỏa được yêu cầu thứ nhất rất dễ bị ngộ nhận là đã thỏa yêu cầu thứ hai. Replay determinism chỉ đòi hỏi các lần đọc lặp lại phải đồng ý với nhau — mà bất kỳ thứ tự toàn phần nào cũng làm được, kể cả một thứ tự ngẫu nhiên.
+:::
+
+---
+
+## Ba projector
+
+Mỗi projector là một deterministic fold trên luồng event đã được nhóm theo checkpoint. Cả ba đều có thể đảo ngược: viết lại code, replay log, nhận belief state mới. Các núm hiệu chỉnh (`k`, `m`, `d`, ngưỡng) được để lại để tinh chỉnh trên dữ liệu thật.
+
+### Fragility: Sự nhất quán theo thời gian
 
 **Trạng thái:** `unprobed` → `fragile` → `robust`
 
-`Fragility` được suy ra bằng một **`fold` hai tầng** trên các event `probe_outcome` của một concept node.
+Fragility được suy ra bằng một **two-stage fold** (fold hai tầng) trên các event `probe_outcome` cho một concept node nhất định.
 
-**Tầng 1 — quy mỗi checkpoint về một tín hiệu** (theo từng node):
-- `STRONG-POS` — đúng, không trợ giúp, độ tin cậy cao
-- `WEAK-POS` — đúng nhưng có giàn giáo, độ tin cậy thấp, hoặc tự sửa được
-- `NEGATIVE` — sai, hoặc đang có một misconception còn active
+**Tầng 1 — net từng checkpoint thành một tín hiệu:**
 
-Cột `envelope` `scaffold_stamp` cùng với giá trị confidence quyết định tín hiệu nào được áp dụng.
+| Tín hiệu | Ý nghĩa |
+|----------|---------|
+| `STRONG-POS` | Trả lời đúng, không trợ giúp, độ tin cậy cao |
+| `WEAK-POS` | Trả lời đúng nhưng có scaffold, độ tin cậy thấp, hoặc tự sửa được |
+| `NEGATIVE` | Trả lời sai, hoặc đang có một misconception active |
 
-**Tầng 2 — điều khiển FSM**:
+`scaffold_stamp` ở envelope và `confidence` quyết định tín hiệu nào được áp dụng.
+
+**Tầng 2 — điều khiển FSM:**
 
 ```mermaid
 stateDiagram-v2
@@ -119,15 +172,15 @@ stateDiagram-v2
     robust --> fragile : any NEGATIVE
 ```
 
-Một lần probe đúng không bao giờ đủ để lên `robust` — kể cả lần probe đầu tiên rất sạch thì cũng chỉ đi tới `fragile`. `Robust` chỉ đạt được khi có `k` `STRONG-POS` liên tiếp mà không bị chen bởi `NEGATIVE` (mặc định `k = 2`). Một `WEAK-POS` sẽ reset chuỗi. Một `NEGATIVE` làm `robust → fragile` ngay lập tức — một khái niệm tưởng đã robust mà vẫn thất bại chính là tín hiệu rủi ro ẩn. Bộ đếm nhỏ `strong_streak` được lưu cùng enum trong `projection` đã lưu.
+Một probe đúng duy nhất vẫn chưa lên được `robust` — ngay cả một lần làm đúng sạch sẽ từ đầu cũng chỉ đi tới `fragile`. `robust` đòi hỏi `k` lần `STRONG-POS` liên tiếp mà không có `NEGATIVE` chen vào (mặc định `k = 2`). Một `WEAK-POS` sẽ làm đứt chuỗi. Một `NEGATIVE` khiến `robust → fragile` ngay lập tức — một concept vốn robust mà vẫn gãy chính là tín hiệu rủi ro ẩn.
 
-Chính cơ chế chặn theo scaffold và confidence này khiến `fragility` mang nghĩa "đứng vững dưới kiểm tra thật" thay vì "cuối cùng cũng làm đúng."
+Chính cơ chế chặn này làm cho fragility mang nghĩa "đứng vững dưới probing thật sự", chứ không phải "cuối cùng cũng làm đúng."
 
-### Misconception: Kích hoạt nhanh khi đủ chắc, gỡ bỏ thận trọng
+### Misconception: Kích hoạt nhanh, giải quyết chậm
 
 **Trạng thái:** `suspected` → `active` → `resolved`
 
-`Misconception projector` suy ra một instance theo từng bộ `(student, node, catalogRef)`, với **độ bất đối xứng ngược lại fragility**.
+Misconception projector suy ra một instance theo từng `(student, node, catalogRef)` mà **tính bất đối xứng của nó ngược với fragility**.
 
 ```mermaid
 stateDiagram-v2
@@ -136,104 +189,142 @@ stateDiagram-v2
     suspected --> active : corroborating FOR
     suspected --> [*] : m consecutive AGAINST
     active --> resolved : m consecutive AGAINST
-    resolved --> active : any FOR (re-activation)
+    resolved --> active : any FOR
 ```
 
-**Kích hoạt diễn ra nhanh, nhưng bị chặn bởi confidence**: chỉ cần một event `FOR` có confidence cao là đi thẳng tới `active` (một niềm tin sai có thể được xác lập từ một quan sát rõ ràng); còn `FOR` confidence thấp sẽ rơi vào `suspected` và cần thêm bằng chứng củng cố.
+**Kích hoạt diễn ra nhanh, nhưng có chặn bằng confidence.** Chỉ một event `FOR` với confidence cao là đủ đi thẳng tới `active` — một niềm tin sai có thể là thật chỉ từ một quan sát rõ ràng. Một `FOR` với confidence thấp thì rơi vào `suspected` và cần được củng cố thêm.
 
-**Gỡ bỏ diễn ra chậm, đòi hỏi tích lũy**: để đi từ `active → resolved`, cần `m` event `AGAINST` liên tiếp mà không có `FOR` chen vào (mặc định `m = 2`). Việc tái kích hoạt khi có `FOR` về sau rất nhạy — nó phản chiếu logic thoái lui của fragility.
+**Giải quyết diễn ra chậm, cần tích lũy.** `active → resolved` cần `m` event `AGAINST` liên tiếp mà không có `FOR` chen vào (mặc định `m = 2`). Nếu về sau có một `FOR`, việc tái kích hoạt diễn ra rất nhạy.
 
-Sự bất đối xứng này được biện minh bởi chi phí sai số. `False positive` làm giảm độ chính xác về groundedness của hệ thống (thước đo headline), nên việc kích hoạt phải bị chặn bởi confidence. Còn gỡ bỏ quá sớm thì lại từ bỏ một misconception vẫn còn sống, nên quá trình gỡ bỏ phải bảo thủ.
+Tính bất đối xứng này phản ánh chi phí sai lầm. False positive làm hại groundedness precision (thước đo headline), nên activation bị chặn bởi confidence. Còn giải quyết quá sớm sẽ bỏ sót một misconception vẫn còn sống, nên resolution được giữ theo hướng bảo thủ.
 
-Instance được khóa theo **home node** của mục catalog (không phải node nơi nó lộ ra), nhờ vậy tránh bị trùng xuyên node. Nó chỉ được tin ở mức headline khi instance là `active` **và** trạng thái catalog là `seeded` hoặc `approved` — hai cổng tin cậy độc lập. Cổng trạng thái catalog được đánh giá ở **thời điểm đọc dưới dạng `join`** giữa trạng thái instance × trạng thái catalog hiện tại, chứ không được nướng cứng vào `fold`. Vì vậy, khi người vận hành phê duyệt một mục catalog ứng viên mà evidence hiện có đã tham chiếu tới, việc nâng cấp lên mức trusted có hiệu lực **ngay lập tức mà không cần replay** — chỉ là một lần đổi trạng thái CRUD trên dòng catalog.
+Instance này được khóa theo **home node** của mục catalog (không phải node nơi nó nổi lên), nhờ đó tránh bị nhân đôi xuyên node. Một instance chỉ được tin ở mức headline khi nó vừa `active` **và** trạng thái catalog là `seeded` hoặc `approved` — hai cổng tin cậy trực giao.
 
-**Lan truyền ở thời điểm đọc**: tác động của một misconception gốc lên các khái niệm phía sau không được lưu trên chính các node phía sau ấy. Góc nhìn "node phía sau này đang có rủi ro" được tính khi đọc, bằng cách đi ngược các cạnh tiên quyết để tìm những niềm tin active ở thượng nguồn. Việc vật chất hóa sự lan truyền xuống các node hạ lưu đã bị loại bỏ vì chỉ cần thêm một cạnh mới hoặc một misconception mới ở thượng nguồn là sẽ lan ra và phải ghi lại rất nhiều dòng, còn `replay` thì phải tái tạo chính xác sự lan truyền đó. Các `projector` theo node nhờ vậy vẫn là những hàm tất định gọn sạch.
+**Cổng trạng thái catalog chỉ nằm ở thời điểm đọc.** Khi một operator phê duyệt một mục catalog candidate, việc nâng cấp sang mức được tin xảy ra ngay lập tức — không cần replay, chỉ cần đổi trạng thái qua CRUD. Fold không bao giờ nhìn thấy trạng thái catalog; phần join diễn ra ở lúc đọc. Nhờ đó fold vẫn giữ được tính xác định.
 
-### Reasoning Pattern: Tích lũy xuyên node
+**Propagation là phép duyệt ở thời điểm đọc, không phải trạng thái được lưu.** Tác động của một root misconception lên các concept downstream không được ghi vào chính các node downstream đó. Phần nhìn "đang rủi ro vì một belief ở thượng nguồn" được tính bằng cách lần ngược các cạnh prerequisite khi đọc. Phương án materialize propagation đã bị bác bỏ vì chỉ một cạnh mới hoặc một misconception ở thượng nguồn mới cũng sẽ phải fan-out để viết lại rất nhiều dòng, và replay sẽ phải tái tạo chính xác fan-out đó.
+
+### Reasoning patterns: Tích lũy xuyên node
 
 **Trạng thái (suy ra ở thời điểm đọc):** `emerging` → `established` ↔ `fading`
 
-`Pattern projector` được khóa theo `(student, patternRef)` — **xuyên node**, khác với các `fold` fragility và misconception vốn theo từng node. Một pattern là một xu hướng mà trạng thái của nó thay đổi theo thời gian ngay cả khi không có evidence mới, nên `fold` chỉ lưu **các bộ tích lũy tối thiểu**:
+```mermaid
+stateDiagram-v2
+    [*] --> emerging : first reinforcement
+    emerging --> established : breadth gate met
+    established --> fading : strength/recency drops
+    fading --> established : new reinforcement
+```
+
+Pattern projector được khóa theo `(student, patternRef)` — **xuyên node**, khác với các fold fragility và misconception vốn theo từng node. Một pattern là một xu hướng mà trạng thái của nó thay đổi theo thời gian ngay cả khi không có bằng chứng mới, nên fold chỉ lưu **các accumulator tối thiểu**:
+
 - Tập các concept node phân biệt mà pattern đã xuất hiện trên đó
-- Các điểm củng cố `(checkpoint, confidence)`
-- Checkpoint được củng cố đầu tiên và cuối cùng
+- Reinforcement points `(checkpoint, confidence)`
+- Checkpoint reinforced đầu tiên và cuối cùng
 
-`Strength` (có trọng số theo độ mới), `scope` (`|distinct_nodes|`), `status` và `valence` đều được suy ra ở thời điểm đọc.
+**Strength** (có trọng số theo độ gần đây), **scope** (`|distinct_nodes|`), **status**, và **valence** đều được suy ra ở thời điểm đọc từ các accumulator này.
 
-Giai đoạn net tầng 1 củng cố một pattern tối đa một lần cho mỗi checkpoint (net confidence = confidence lớn nhất) và hợp nhất toàn bộ concept node mà checkpoint đó tham chiếu vào tập độ rộng.
+Việc net ở tầng 1 chỉ reinforcement một pattern tối đa một lần trong mỗi checkpoint (net confidence = max) và hợp nhất tất cả concept node mà checkpoint đó tham chiếu vào tập breadth.
 
-Việc **thăng lên `established`** đòi hỏi một cổng duy nhất về độ rộng: được củng cố ở ≥ `d` checkpoint phân biệt trải trên ≥ `d` concept phân biệt. Điều này ngăn không cho một hành vi chỉ gắn với một concept, hoặc một lần làm giàu nội dung trên nhiều concept nhưng chỉ xảy ra một lần, bị nâng nhầm thành một thói quen xuyên suốt. Khi đã established, `strength` và độ mới quyết định chuyển dịch `established ↔ fading`.
+**Việc thăng hạng lên `established`** đòi hỏi một breadth gate: được reinforcement ở ≥ `d` checkpoint phân biệt trải trên ≥ `d` concept phân biệt. Nhờ vậy, cả một hành vi chỉ đặc thù cho một concept lẫn một lần thử giàu dữ liệu nhưng đa concept đều không bị nâng thành một thói quen xuyên suốt. Sau đó, strength và recency điều khiển chuyển đổi `established ↔ fading`.
 
-Pattern là **ngoại lệ có chủ ý** đối với tính bám dính của niềm tin (xem bên dưới). Một misconception không tự biến mất; một niềm tin sai là sự kiện tiềm ẩn vẫn còn đúng cho đến khi bị phản chứng. Nhưng một thói quen thì chỉ mạnh bằng mức nó còn được thực hành gần đây — vì vậy pattern sẽ mờ dần nếu không được củng cố, thay vì tồn tại mãi không đổi.
+**Valence** (`helpful` / `harmful`) nằm dưới dạng một cột nullable trên `pattern_catalog` (misconception thì mặc định là harmful, nên `misconception_catalog` không có cột tương ứng). Lớp overlay của belief state đọc nó từ mục catalog đã match. Chính valence mới tách được một thói quen đáng củng cố khỏi một thói quen cần bị ngắt lại — một client chỉ đọc `status` và `strength` mà thiếu valence sẽ không biết một pattern đã established là tin vui hay tin xấu.
 
-**Fading dùng thời gian của evidence, không dùng đồng hồ thực.** "Bây giờ" được định nghĩa là checkpoint mới nhất trong `log`; mức mờ dần được đo bằng khoảng cách checkpoint. Pattern của một tài khoản ngủ yên sẽ không tự mờ đi (đây là điều chấp nhận được cho PoC). Cách làm dựa trên thời gian lịch đã bị loại vì một đầu vào là đồng hồ thực sẽ khiến trạng thái suy ra không còn tái lập được — cùng một `evidence log` sẽ cho đáp án khác nhau ở các thời điểm thật khác nhau, phá vỡ tính tất định của `replay`.
-
-### Các quy tắc trung thực — Điểm thống nhất giữa ba fold
-
-Mỗi `fold` chỉ suy ra một khẳng định mạnh khi đi qua một cổng thăng cấp, và **hình dạng của từng cổng khớp với đúng điều mà lớp đó khẳng định**:
-
-| Lớp | Khẳng định | Hình dạng cổng |
-|-------|-------|------------|
-| Fragility | Tính nhất quán theo thời gian | Lặp lại (`k` strong-positive liên tiếp) |
-| Misconception | Một niềm tin sai cụ thể | Confidence (một quan sát rõ ràng là đủ) |
-| Pattern | Một thói quen xuyên suốt | Độ rộng (xuất hiện trên nhiều concept phân biệt) |
-
-Nằm dưới cả ba cổng thăng cấp ấy là thêm một quy tắc: **không có evidence thì không được tạo ra instance nào cả**. Mọi trạng thái trong từ vựng của cả ba lớp đều đã hàm ý rằng đã quan sát được điều gì đó — `suspected` nghĩa là "đã quan sát một lần, nhưng yếu", `emerging` nghĩa là "đã được củng cố ít nhất một lần". Không có trạng thái nào mang nghĩa "chưa biết gì". Một `fold` trả về bất kỳ trạng thái nào cho một học sinh mà nó chưa từng thấy nói về tức là đang đưa ra khẳng định mà không có bằng chứng.
-
-Điều này đã từng bị vi phạm trong thực tế. `Misconception fold` theo dõi đúng một sentinel nội bộ `unseen`, nhưng ở bước trả kết quả lại gộp nó thành `suspected`. Adapter khi đó không còn tín hiệu nào để phân biệt "chưa từng quan sát" với "nghi ngờ yếu", nên mỗi lần đọc đều trả về một entry cho mọi misconception đã approved trong catalog — một học sinh hoàn toàn mới trông như đang bị nghi ngờ yếu với mọi misconception đã ghi nhận, và mức nhiễu tăng theo kích thước catalog. Cách sửa là biến sự vắng mặt thành giá trị trả về hạng nhất: `foldMisconception` trả về `MisconceptionState | null`, còn adapter bỏ qua `null`. `Pattern fold` thì không cần đổi chữ ký vì danh sách `reinforcements` rỗng vốn đã báo hiệu sự vắng mặt.
+**Patterns là ngoại lệ có chủ ý đối với độ bám của belief.** Một misconception không tự biến mất; một niềm tin sai là một sự thật tiềm ẩn, vẫn đúng cho tới khi có bằng chứng phủ định. Còn một thói quen thì chỉ mạnh chừng nào nó còn được luyện gần đây — nên pattern sẽ *fade* nếu không được reinforcement, thay vì tồn tại nguyên vẹn mãi. Fading được đo theo **evidence-time** (khoảng cách checkpoint), với "hiện tại" được định nghĩa là checkpoint mới nhất trong log. Phương án làm fading theo lịch thời gian thực đã bị bác bỏ: nếu đưa đồng hồ tường vào, trạng thái suy ra sẽ không còn tái lập được khi replay trên cùng một log.
 
 ---
 
-## Các bất biến chính
+## Điểm chung của cả ba: Promotion gate và quy tắc trung thực
 
-**Belief có tính bám dính.** Một checkpoint không sinh ra event nào về một concept nhất định thì sẽ giữ nguyên belief của concept đó đúng như trước. Không có bằng chứng không có nghĩa là bằng chứng phủ định. Analyst đọc `belief state` đã lưu như *ngữ cảnh* nhưng không bao giờ được phát lại nó thành event — nếu làm vậy sẽ đếm đôi, làm phình `log`, và ghi lại một kết luận thay vì một quan sát. (Điều này áp dụng cho misconceptions và fragility; pattern là ngoại lệ vì chúng có thể mờ dần.)
+Mỗi fold chỉ đưa ra một khẳng định mạnh khi đã đi qua một promotion gate. **Hình dạng của từng gate khớp đúng với loại khẳng định mà lớp đó đưa ra**:
 
-**Misconception fold là fold duy nhất nhạy với thứ tự.** Tầng 1 của fragility net bằng cách quét xem có tín hiệu âm nào hay không — nên kết quả không đổi theo thứ tự event. Pattern fold net bằng cách lấy confidence lớn nhất và hợp nhất các node ID — cả hai đều độc lập với thứ tự. Nhưng misconception fold thì lại đếm các event `AGAINST` *liên tiếp*, và reset nếu gặp bất kỳ `FOR` nào. Một misconception đang `active` nếu gặp `[for, against, against]` trong một checkpoint thì sẽ được gỡ; nhưng cũng chính ba event đó nếu là `[against, against, for]` thì vẫn để nó ở `active`. Vì vậy, thứ tự event bên trong một checkpoint thật sự quan trọng.
+| Lớp | Điều nó khẳng định | Gate |
+|-----|--------------------|------|
+| Fragility | Sự nhất quán theo thời gian | Lặp lại — `k` checkpoint strong-positive liên tiếp |
+| Misconception | Một niềm tin sai cụ thể | Confidence — một quan sát rõ ràng là có thể đủ để xác lập |
+| Pattern | Một thói quen xuyên suốt | Breadth — được thấy trên nhiều concept phân biệt |
 
-Lượt đọc projection hiện tại sắp xếp theo `ORDER BY ts, id`. Cách này đóng được lỗ hổng về tính tất định của `replay` (nhiều lần đọc lặp lại giờ sẽ đồng nhất), nhưng không sắp xếp theo trình tự quan sát thực sự. `ts` được điền bằng `now()` tại thời điểm insert — giống nhau cho mọi dòng trong một câu lệnh `appendCheckpointBatch` — nên thứ tự sắp xếp thực tế rơi xuống UUID ngẫu nhiên. Kết quả là `fold` trở nên tất định quanh một thứ tự *tùy tiện*. Cách sửa là dùng `ORDER BY ts, segment, observation_index`, vì ADR-022 đã giải phóng `observation_index` khỏi vai trò định danh để nó chỉ còn ghi thứ tự phát ra thực sự.
+Các gate này cùng chia sẻ một nguyên tắc: một lớp không được khẳng định quá mức khi chưa có đúng loại bằng chứng mà lời khẳng định đó đòi hỏi.
+
+**Tầng nền dưới mọi gate: không có bằng chứng thì không được sinh ra instance nào.** Mọi trạng thái trong từ vựng của cả ba lớp đều khẳng định rằng đã quan sát thấy *điều gì đó*. `suspected` nghĩa là "đã quan sát một lần, nhưng yếu." `emerging` nghĩa là "đã được reinforcement ít nhất một lần." Không trạng thái nào có một từ để chỉ "chưa biết gì cả." Nếu một fold trả về bất kỳ trạng thái nào cho một học sinh mà nó không hề có bằng chứng, thì bản thân fold ấy đang đưa ra một khẳng định.
+
+Điều này từng bị vi phạm trong thực tế. Misconception fold đã ép một sentinel nội bộ `unseen` thành `suspected` ở đầu ra, khiến adapter không phân biệt được "chưa từng quan sát" với "nghi ngờ yếu." Kết quả là mỗi lần đọc đều trả về một entry cho mọi misconception đã approved trong catalog — một học sinh mới xuất hiện như thể đang bị nghi ngờ yếu ở tất cả chúng. Bản sửa là: `foldMisconception` trả về `MisconceptionState | null`, và adapter bỏ qua `null`. Pattern fold thì không cần sửa — một danh sách `reinforcements` rỗng vốn đã biểu thị sự vắng mặt.
+
+**Chỉ misconception fold là nhạy với thứ tự.** Tầng 1 của fragility net bằng cách quét xem có tín hiệu negative nào không — nên thứ tự không ảnh hưởng kết quả. Pattern fold lấy max confidence rồi union các node ID — cả hai đều độc lập với thứ tự. Misconception fold thì đếm số event `AGAINST` *liên tiếp* và reset khi gặp `FOR`. Vì vậy, nếu ordering trong event pipeline thay đổi, misconception fold là nơi đầu tiên cần kiểm tra.
 
 ---
 
-## Các vấn đề còn mở và khoảng trống của lược đồ
+## Read model của graph và danh tính concept
 
-### Gộp bí danh node — Chưa có gì xử lý
+### Gộp alias: Giải quyết ở thời điểm đọc (ADR-024)
 
-`mergeNodes(survivorId, aliasId)` chỉ ghi đúng một cột — `nodes.merged_into` — và không có đường đọc hay ghi nào khác tra cứu cột này. `getPrerequisites` không resolve node đầu vào qua `merged_into`; các cột `home_node_id` của bảng catalog cũng không được resolve; cả evidence repository lẫn projection repository đều không tham chiếu `merged_into`. Sau khi gộp node E vào node sống sót F: `getPrerequisites(F)` không trả gì; `matchCatalog(F)` không tìm ra entry nào; evidence của học sinh vẫn bám vào E và `belief state` bị xé đôi giữa một khái niệm và chính trạng thái nghỉ hưu của nó.
+Khi gọi `mergeNodes(survivorId, aliasId)`, hệ thống chỉ ghi đúng một cột: `nodes.merged_into` trên dòng alias. Không remap cạnh, không cập nhật dòng catalog, không đụng vào dòng evidence nào. Việc giải quyết diễn ra ở thời điểm đọc trong phần core của module — lớp duy nhất có thể chạm nhiều hơn một port.
 
-**ADR-024** chốt nguyên tắc xử lý resolve. `mergeNodes` tiếp tục chỉ ghi một cột. Việc resolve diễn ra ở thời điểm đọc, trong phần lõi của module — nơi duy nhất có thể chạm vào nhiều hơn một port. Không adapter nào được phép tự resolve thứ gì. `evidence_events` là `append-only` nhờ trigger của cơ sở dữ liệu và không bao giờ có thể viết lại `node_id`, nên việc resolve ở thời điểm đọc là bắt buộc trong mọi trường hợp.
+Giải quyết ở thời điểm đọc không chỉ là một lựa chọn; nó là bắt buộc. `evidence_events` là append-only theo trigger của cơ sở dữ liệu, nên `node_id` tuyệt đối không thể bị viết lại. Bất kỳ phương án nào còn remap cạnh và dòng catalog ngay lúc merge cũng sẽ bổ sung thêm một cơ chế thứ hai lên trên cơ chế vốn vẫn bắt buộc phải có — và sẽ phá hủy thông tin cần thiết để un-merge.
 
-Việc resolve alias cần hai thao tác trái chiều:
+Evidence được ghi với raw node ID sẽ được resolve ở thời điểm fold. Danh tính của dòng vẫn ổn định dưới khóa có phạm vi theo danh tính, còn việc merge sẽ hợp nhất lịch sử của học sinh theo hướng hồi tố mà không cần migration dữ liệu.
 
-- **`resolveAlias(id) → survivorId`** — nhiều-về-một; áp dụng cho mọi node ID *đi ra khỏi* engine, và cho `node_id` của evidence cùng `home_node_id` của catalog tại thời điểm fold và match.
-- **`expandAliases(survivorId) → Set<id>`** — một-về-nhiều, có tính bắc cầu; áp dụng cho mọi node ID *đi vào* một truy vấn trên bảng đang lưu các ID lịch sử.
+**Cần hai thao tác ngược chiều nhau:**
 
-Chiều ngược là phần ít hiển nhiên hơn. Sau E → F, các prerequisite của F nằm trên những cạnh được lưu dưới dạng `from_node_id = E`, nên nếu chỉ resolve đầu vào truy vấn theo chiều thuận thì cũng không giúp được gì. `CTE` đệ quy phải khởi tạo trên *tập* `{F, E}` và match bằng `= ANY(...)` cả ở hạt giống lẫn ở bước `join` đệ quy — nếu không, chỉ cần giữa đường gặp một alias là cả hành trình sẽ gãy ngay tại đó.
+```mermaid
+flowchart LR
+    subgraph OUT ["Outbound — many-to-one"]
+        OA["resolveAlias(id)"] --> OB["survivorId"]
+    end
+    subgraph IN ["Inbound — one-to-many, transitive"]
+        IA["expandAliases(survivorId)"] --> IB["{survivorId, aliasId, ...}"]
+    end
+```
 
-### Kiểm tra loại cạnh — Lỗi im lặng
+`resolveAlias` áp dụng cho mọi node ID *đi ra* khỏi engine, và cho `node_id` / `home_node_id` tại lúc fold và match. `expandAliases` áp dụng cho mọi node ID *đi vào* một truy vấn trên bảng đang lưu các ID lịch sử.
 
-`engine.edges.type` là `text` thuần, không có ràng buộc CHECK. Toàn bộ cơ chế duyệt đồ thị chỉ lọc theo literal `type = 'prereq'`. Một cạnh được seed là `'prerequisite'`, `'Prereq'` hay `'prereq '` vẫn được cả cơ sở dữ liệu lẫn trình biên dịch TypeScript chấp nhận, nhưng rồi lặng lẽ không bao giờ được duyệt — khái niệm trông như không có tiên quyết nào, không lỗi và cũng chẳng có dòng log nào.
+Hướng ngược mới là phần ít hiển nhiên. Sau khi E → F, các prerequisite của F vẫn nằm trên các cạnh được lưu dưới dạng `from_node_id = E`. Resolve đầu vào truy vấn thành F không làm thay đổi gì — bản thân F không có cạnh riêng. Recursive CTE phải seed từ tập `{F, E}` và match bằng `= ANY(...)` ở cả seed lẫn recursive join. Nếu một alias chỉ được chạm tới ở giữa chuỗi, phép duyệt sẽ đứt ngay tại bước đó.
 
-**ADR-025** chỉ ra rằng `edges.type` đang mang hai lớp từ vựng chung một cột: các quan hệ **cấu trúc** mà mã của engine có rẽ nhánh dựa vào (`prereq`; một quan hệ taxonomy đã được hoạch định nhưng chưa xây), và các quan hệ **theo miền** mà engine không hề tự diễn giải. R-5 chỉ chi phối nửa theo miền — `prereq` là quan hệ cấu trúc của đồ thị, không phải môn học hay phương pháp sư phạm. Engine khai báo các quan hệ mà nó tự diễn giải thành một hằng `STRUCTURAL_EDGE_TYPES` trong `domain/graph/edge.ts` và coi mọi thứ còn lại là opaque. Việc kiểm tra ở ranh giới module chỉ là kiểm tra định dạng: một regex duy nhất `/^[a-z][a-z0-9-]*$/` loại `'Prereq'` và `'prereq '` ngay tại thời điểm gọi, còn `'motivates'` hay `'contrasts-with'` thì đi qua nguyên trạng. Không dùng CHECK constraint — vì CHECK sẽ đóng cột này lại trước các quan hệ theo miền trong tương lai.
+:::caution[Khoảng trống hiệu năng còn mở]
+`getMergeMap()` đang quét tuần tự toàn bộ bảng node ở mỗi lần gọi (`WHERE merged_into IS NOT NULL`, không có index trên `merged_into`). Với 50.000 node mà chỉ 20 node đã merge: cần 658 lần đọc buffer thay vì 3 nếu có partial index. Một lời gọi `getBeliefState` cũng lại fetch map này cho từng node trong bộ lọc của nó, không có tái sử dụng trong cùng request. Một partial index (`ON engine.nodes (merged_into) WHERE merged_into IS NOT NULL`) sẽ đưa việc này về index scan. Hiện vẫn chưa được thêm.
+:::
 
-*(Vẫn còn sót một trường hợp: `'prerequisite'` là một slug hợp lệ về mặt hình thức và lại là một từ khác với `'prereq'`, nên nó sẽ được lưu như một cạnh theo miền và không bao giờ được duyệt. Không có quy tắc định dạng nào bắt được kiểu đồng nghĩa này.)*
+### Xác thực loại cạnh (ADR-025)
 
-**Một lưu ý bên lề về tên bảng catalog**: các bảng của engine có tên là `misconception_catalog` và `pattern_catalog`. Nhìn lướt thì chúng giống vi phạm R-5 — R-5 cấm lược đồ của engine gọi tên môn học, ngôn ngữ hay phương pháp sư phạm. Nhưng xem kỹ thì không sao: "misconception" và "pattern" là từ vựng cấp engine của chính dự án, không phải nội dung theo môn học. Khác biệt ở đây là lược đồ so với dữ liệu — không có tên *cột* nào gọi tên môn học hay cách dạy, trong khi các *dòng* catalog dĩ nhiên sẽ gọi tên những khái niệm thật, và đó chính là nơi R-5 muốn nội dung theo miền nằm vào. Lập luận tương tự cũng áp dụng cho `nodes.slug`, nơi các giá trị sẽ gọi tên những khái niệm như `equivalent-fractions` — cột slug là một khóa tự nhiên để seed idempotent, còn nội dung bên trong nó là dữ liệu. Điều này đáng nhớ vì các tên ấy sẽ khiến mọi reviewer tương lai phải nghi ngờ ngay từ cái nhìn đầu tiên.
+`engine.edges.type` mang hai loại từ vựng. Một là các quan hệ **structural** mà code của engine có rẽ nhánh theo (`prereq`; một quan hệ taxonomy đã được ghi trong charter nhưng chưa xây). Hai là các quan hệ **domain** mà engine không bao giờ diễn giải. Quy tắc trung lập miền của engine chỉ chi phối loại thứ hai — `prereq` là quan hệ cấu trúc của đồ thị, không phải một môn học hay phương pháp dạy.
 
-### Pattern Valence — Đã thiết kế nhưng chưa xây
+Engine khai báo các quan hệ mà nó diễn giải trong `STRUCTURAL_EDGE_TYPES` ở `domain/graph/edge.ts` và chấp nhận mọi thứ khác như dữ liệu opaque. Việc xác thực ở ranh giới module chỉ kiểm tra định dạng: một regex duy nhất `/^[a-z][a-z0-9-]*$/` loại `'Prereq'` và `'prereq '` ngay khi gọi, còn `'motivates'` hay `'contrasts-with'` thì đi qua nguyên vẹn. Không dùng CHECK constraint — CHECK sẽ khóa cột này trước các quan hệ domain có thể có trong tương lai. Phần traversal lọc theo hằng số đã khai báo chứ không dựa vào một literal trần.
 
-Cả hai bảng catalog được tạo ra từ một bộ cột dùng chung (`id`, `home_node_id`, `status`, `slug`, `label`, `description`, timestamps). `Pattern catalog` không có cột `valence`. Thiết kế nói rằng `valence` được đọc từ entry catalog tại lúc overlay, nên `PatternInstanceView.valence` đang bị hard-code thành `null` trên mọi pattern được trả về.
+Có một chỗ hụt: `'prerequisite'` là một slug đúng định dạng nhưng lại là một từ khác với `'prereq'`, nên nó sẽ được lưu như một cạnh domain và không bao giờ bị duyệt. Không có quy tắc định dạng nào bắt được một từ đồng nghĩa như vậy.
 
-`Valence` là thứ phân tách một thói quen đáng được củng cố với một thói quen cần bị ngắt. Không có nó, một consumer đọc `status` và `strength` sẽ không biết một pattern đã established là tín hiệu tốt hay xấu. Cách sửa cần thêm một cột chỉ trên bảng pattern — còn misconception thì mặc định đã có hại theo định nghĩa, nên misconception catalog không cần cột này. Bộ cột dùng chung trong migration ban đầu không thể đơn giản nới rộng; bảng pattern cần có `addColumns` riêng. Khoảng trống này đã được nhận ra trước khi adapter được viết; kiểu view được khai báo nullable như một giải pháp tạm, và có một bài kiểm thử khóa chặt hành vi `null` hiện tại để nó không bị hiểu nhầm là tai nạn.
+*(Một lưu ý về cách đặt tên: `misconception_catalog` và `pattern_catalog` thoạt nhìn có vẻ vi phạm quy tắc trung lập miền của engine. Thực ra không phải — "misconception" và "pattern" là từ vựng ở cấp engine do chính dự án định nghĩa, không phải nội dung của môn học. Phân biệt nằm ở schema so với data: không có cột nào gọi tên một môn học hay phương pháp dạy, còn các dòng catalog thì gọi tên các khái niệm thật, và đó chính là nơi nội dung miền nên nằm.)*
 
-### Phân loại Port — `getBeliefState` không phải phương thức repository
+---
 
-Tài liệu thiết kế của engine đã khai báo bề mặt `driving port` (những gì caller bên ngoài gọi vào) nhưng không khai báo bề mặt `driven` (những gì phần lõi cần từ hạ tầng). Bản dựng đã lấp chỗ trống này bằng cách nhân bản tên của `driving port` thành tên interface repository. Với đa số thao tác — "lưu cái này / lấy cái kia" — chuyện đó vô hại. Nó hỏng ở `getBeliefState`, vì đây là một phép tính trên ba nguồn chứ không phải một lượt đọc từ nơi lưu trữ.
+## Các khoảng trống còn mở
 
-Chỉ riêng việc đặt tên nó là một phương thức repository đã biến nó thành như vậy về mặt khai báo. Repository khi ấy buộc phải chạy các `fold`, nên nó cần entry catalog và prerequisite, tức là phải giữ thêm hai port khác. Khoảng 130 dòng quy tắc suy luận belief thế là nằm cạnh SQL. Các lượt review đối chiếu tên với tài liệu thiết kế và thấy khớp, nên sự phân loại sai này lọt qua ba vòng review liên tiếp — nó chỉ lộ ra khi so sánh cả bốn adapter cùng lúc.
+### Thiếu xác thực `ref` ở ranh giới ghi
+
+Các event `misconception_evidence` và `pattern_evidence` mang một `catalogRef` hoặc `patternRef` mà fold sẽ join với slug trong catalog. Analyst không bao giờ tự bịa ra một ref — nó hoặc tìm một mục có sẵn, hoặc tạo một candidate, rồi nhận lại slug để dẫn chiếu. Thiết kế đã nói rất rõ: không có checkpoint nào mà `misconception_evidence` lại hợp lệ khi mang `ref` rỗng.
+
+Envelope validation hiện không ép điều này. Nó có kiểm tra `type` và payload denylist, nhưng `catalogRef`/`patternRef` vẫn là tùy chọn trong type definition và không có trường nào bị bắt buộc theo type. Một event với ref rỗng vẫn được lưu, không match được gì trong fold, và bị phớt lờ mãi mãi — trên một bảng append-only.
+
+Chặn ở ranh giới ghi an toàn hơn chấp nhận: `appendCheckpointBatch` là all-or-nothing, nên nếu throw thì đó là một lỗi sạch, có thể phục hồi — Analyst chỉ cần đề xuất candidate rồi retry. Chấp nhận ref rỗng mới là thứ khiến quan sát bị mất vĩnh viễn.
+
+### Candidate trong catalog không thể bị bác bỏ
+
+Từ vựng trạng thái của catalog là `seeded | approved | candidate`. Chuyển trạng thái duy nhất được phép là `candidate → approved`. Bộ công cụ cho operator có `approve_candidate` nhưng không có động tác ngược lại để bác bỏ. Nếu một operator đánh giá một candidate được đề xuất là sai, họ không có hành động nào khả dụng — nó sẽ nằm ở `candidate` mãi mãi.
+
+Nửa an toàn là: một candidate vĩnh viễn sẽ không bao giờ xuất hiện trong belief state, vì phần đọc chỉ fetch các mục `seeded`/`approved`. Nửa nguy hiểm là: `matchCatalog` khi không lọc theo trạng thái vẫn trả về candidate, nên lần Analyst tiếp theo sẽ tìm thấy nó và tái sử dụng slug đó. Evidence cứ thế tích lũy vào một khái niệm vốn đã bị đánh giá là sai, trên một append-only log, trong khi quyết định bác bỏ ấy chẳng được ghi lại ở đâu.
+
+Kịch bản xấu nhất: một lần approved nhầm về sau sẽ ngay lập tức kích hoạt hồi tố mọi quan sát từng neo vào slug đó chỉ trong một lần đọc — không cần replay, chỉ bằng một lần đổi trạng thái qua CRUD — làm lộ ra một misconception đã tồn tại lâu và được củng cố dày đặc, dù nó từng bị bác từ nhiều tháng trước.
+
+Một trạng thái cuối `rejected` là hình dạng sạch nhất hiện có. Evidence neo vào đó đơn giản là sẽ không bao giờ được fold (chính là kết quả an toàn đã có sẵn). Xóa hẳn dòng catalog thì ngược lại sẽ làm mất audit trail và để lại evidence treo, vì `ref` là một slug chứ không phải foreign key.
+
+### `getBeliefState` thuộc về core, không phải repository
+
+Tài liệu thiết kế của engine đã khai báo bề mặt driving port (những gì phía gọi sẽ dùng) nhưng lại không khai báo driven surface (những gì core cần từ hạ tầng). Khoảng im lặng đó khiến phần hiện thực tự lấp chỗ trống bằng cách sao chép tên driving port sang tên interface của repository. Với hầu hết thao tác — "lưu cái này / lấy cái kia" — sự sao chép ấy vô hại. Nhưng nó vỡ ra ở `getBeliefState`, vì đây là một phép tính trên ba nguồn, chứ không phải một lần đọc từ store.
+
+Chỉ vì được đặt tên là một phương thức repository mà nó đã trở thành repository theo nghĩa khai báo. Từ đó repository buộc phải chạy các fold, rồi cần cả catalog entry lẫn prerequisite, và vì vậy lại phải cầm thêm hai port khác — khoảng 130 dòng luật suy diễn belief rốt cuộc nằm cạnh SQL. Các review chỉ đối chiếu tên với bản thiết kế và thấy khớp, nên việc phân loại sai đã lọt qua ba vòng review liên tiếp. Chỉ khi so bốn adapter với nhau cùng lúc thì lỗi này mới lộ ra.
 
 ---
 
 ## Các trang liên quan
 
-- Để xem mô hình niềm tin định nghĩa fragility, misconceptions và patterns *có nghĩa gì*, hãy xem [Mô hình tinh thần](./mental-model.md).
-- Để xem cách tính đúng đắn của engine được kiểm chứng bằng các fitness function, hãy xem [Kiểm chứng Engine](./engine-validation.md).
+- Để hiểu fragility, misconceptions, và patterns *có nghĩa gì*, xem [Thiết kế mô hình tư duy](./mental-model.md).
+- Để biết cách tính đúng đắn của engine được kiểm chứng bằng các fitness function ra sao, xem [Kiểm chứng engine](./engine-validation.md).

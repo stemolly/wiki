@@ -3,8 +3,6 @@ title: Teaching & Sessions
 description: How Stemolly teaches — pluggable pedagogies, lesson briefs as authored direction, the probing policy that surfaces fragility, and the scaffolding ladder for stuck students.
 ---
 
-# Teaching & Sessions
-
 Stemolly does not deliver content at students — it guides them to construct understanding themselves. The AI tutor holds a live conversation, asks questions, and adapts in real time. But the approach is not one-size-fits-all: the teaching method (called a *pedagogy*) varies by subject and is resolved fresh at the start of every session. This page explains how that works — what a lesson is, how probing operates in Socratic subjects, how stuck students get help, and how the curriculum is built.
 
 ---
