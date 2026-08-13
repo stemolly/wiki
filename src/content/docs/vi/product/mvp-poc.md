@@ -1,53 +1,51 @@
 ---
 title: Phạm vi MVP & PoC
-description: MVP-1 sẽ phát hành những gì (Student app, Console, Lesson mode, Math K11 và Language IELTS), và cách một Engine-Validation PoC dùng Claude qua một MCP append-only kiểm chứng belief-graph engine trước khi xây dựng đầy đủ ứng dụng.
+description: MVP-1 phát hành những gì (Student app + Console, chế độ Lesson, Math K11 + Language IELTS) và cách PoC Engine-Validation với Claude qua một MCP append-only chứng minh belief-graph engine trước khi xây dựng ứng dụng hoàn chỉnh.
 ---
 
-MVP-1 là sản phẩm đầu tiên Stemolly đưa ra — nhưng trước khi xây ứng dụng hoàn chỉnh, đội ngũ sẽ chạy một **Engine-Validation PoC (PoC kiểm chứng engine)** với một học sinh thật. PoC này nhằm chứng minh belief-graph engine đáng để đầu tư; chỉ sau đó ứng dụng mới được xây. Trang này trình bày cả hai phần: MVP-1 sẽ phát hành những gì, và PoC đi trước để mở đường ra sao.
+MVP-1 của Stemolly được xây quanh một giả định cốt lõi duy nhất: một belief-graph engine (bộ máy đồ thị niềm tin) có thể theo dõi mô hình tư duy của học sinh ở những môn học rất khác nhau. Mọi thứ trong MVP — phần nào được phát hành, phần nào được hoãn, PoC được tổ chức ra sao — đều xuất phát từ giả định đó.
 
----
+## MVP-1 phát hành gì
 
-## Phạm vi ứng dụng MVP-1
-
-### Hai ứng dụng, với chính đội ngũ là người dùng đầu tiên
+### Hai ứng dụng: Student + Console
 
 MVP-1 phát hành hai ứng dụng:
 
-- **Student app (ứng dụng học sinh)** — bề mặt học tập nơi học sinh tham gia các bài học.
-- **Console (bảng điều hành)** — công cụ cho nhà giáo dục/người vận hành, gồm khu vực **Author** để xây dựng curriculum (chương trình học) và khu vực **Observe** để xem lại các chỉ số của engine cùng tiến độ của học sinh.
+- **Student app** — bề mặt học tập nơi học sinh học bài.
+- **Console** — công cụ dành cho nhà giáo dục/người vận hành, với khu vực **Author** để xây dựng chương trình học và khu vực **Observe** để xem các chỉ số của engine và tiến độ của học sinh.
 
-Giáo viên và nhà trường với tư cách một tầng người dùng được quản lý sẽ được dời sang giai đoạn sau. Trong MVP-1, chính đội Stemolly là người dùng Console đang hoạt động — xây curriculum trong Author, theo dõi engine trong Observe, và kiểm chứng xem các tín hiệu mental-model (mô hình nhận thức) có thực sự đáng tin hay không.
+Giáo viên và nhà trường với vai trò người dùng được quản lý sẽ được dời sang giai đoạn sau. Trong MVP-1, chính đội Stemolly là người dùng Console đang hoạt động — xây chương trình học trong Author, theo dõi engine trong Observe, và kiểm chứng xem các tín hiệu về mô hình tư duy có thực sự đáng tin hay không.
 
 ### Một chế độ học: Lesson
 
-Stemolly có ba study mode (chế độ học) là Lesson, Assessment/Diagnostic và Assignment Help. MVP-1 chỉ phát hành **Lesson**. Các chế độ còn lại sẽ để sau.
+Stemolly có ba chế độ học (Lesson, Assessment/Diagnostic, Assignment Help). MVP-1 chỉ phát hành **Lesson**. Các chế độ còn lại được hoãn lại.
 
-Đây là một lựa chọn có chủ đích. Một buổi Lesson bắt đầu bằng **structured curriculum path picker (bộ chọn lộ trình chương trình học có cấu trúc)** — học sinh chọn môn học, lộ trình và bài học từ curriculum do đội ngũ biên soạn. Lộ trình được chọn sẽ nối thẳng tới các lesson brief (bản tóm tắt bài học) đã được soạn sẵn để tutor dẫn dắt theo lối Socratic. Một lộ trình có cấu trúc cũng khớp gọn với concept graph (đồ thị khái niệm): mỗi bài học tương ứng với những node đã biết và các prerequisite edge (cạnh tiên quyết), nhờ đó engine có những điểm neo ổn định để gắn evidence (bằng chứng) ngay từ lượt đầu tiên.
+Lý do là có chủ đích. Một phiên Lesson bắt đầu bằng một **structured curriculum path picker** (bộ chọn lộ trình chương trình học có cấu trúc) — học sinh chọn môn học, lộ trình và bài học từ chương trình do đội ngũ biên soạn. Lộ trình đã chọn này được nối trực tiếp với các lesson brief do đội ngũ soạn để tutor dẫn dắt theo lối Socratic. Một lộ trình có cấu trúc cũng ánh xạ gọn gàng vào concept graph (đồ thị khái niệm): mỗi bài học tương ứng với các node đã biết và các prerequisite edge (cạnh tiên quyết), nhờ đó engine có các điểm neo ổn định để gắn evidence ngay từ lượt trao đổi đầu tiên.
 
-**Vì sao không cho nhập chủ đề bằng free-text topic entry (văn bản tự do)?** Nếu học sinh có thể gõ bất kỳ chủ đề nào mình muốn, AI sẽ phải tự bày ra cấu trúc ngay trong lúc chạy. Khi đó sẽ không có concept node ổn định để neo evidence vào, và như vậy sẽ làm suy yếu đúng điều cốt lõi mà MVP-1 cần kiểm chứng — rằng engine tạo ra được một belief graph có thật và có cơ sở. Có thể bổ sung nhập tự do sau, khi engine đã được chứng minh trên các lộ trình có cấu trúc.
+**Vì sao không cho nhập chủ đề tự do?** Nếu học sinh có thể gõ bất kỳ chủ đề nào mình thích, AI sẽ phải tự bịa ra cấu trúc tại chỗ. Khi đó sẽ không có các concept node ổn định để neo evidence vào, và điều này làm suy yếu chính điều mà MVP-1 cần kiểm chứng — rằng engine tạo ra được một belief graph thực sự và có nền tảng. Tính năng nhập chủ đề tự do có thể bổ sung sau khi engine đã được chứng minh trên các lộ trình có cấu trúc.
 
-### Hai môn học: sâu với Math, mỏng với Language
+### Hai môn học: sâu ở Math, mỏng ở Language
 
-MVP-1 ra mắt với hai nhóm môn:
+MVP-1 khởi động với hai nhóm môn:
 
 | Môn học | Nội dung | Lý do |
 |---|---|---|
-| **Math — Vietnam K11** | Độ sâu đầy đủ, prerequisite DAG thực | Những ngộ nhận bộc lộ rõ và có thể bám chắc vào dữ liệu; đây là màn kiểm chứng engine mạnh nhất |
-| **Language — IELTS Writing + Reading** | Phạm vi khởi đầu mỏng | Chứng minh engine có thể khái quát sang một lĩnh vực và phương pháp sư phạm rất khác |
+| **Math — Vietnam K11** | Độ sâu đầy đủ, prerequisite DAG (đồ thị có hướng không chu trình theo quan hệ tiên quyết) thật | Các ngộ nhận hiện ra rõ ràng và dễ quy chiếu; tạo ra bản demo kiểm chứng engine mạnh nhất |
+| **Language — IELTS Writing + Reading** | Phát hành mỏng | Chứng minh engine có thể khái quát sang một miền và phương pháp sư phạm rất khác |
 
-Luận điểm lớn mà MVP-1 theo đuổi là **một engine có thể tạo ra một mental graph hữu ích trên hai lĩnh vực rất khác nhau** — dạy Math theo lối Socratic và huấn luyện Language theo kiểu Correct/Reinforce. Đây là một khẳng định lớn hơn nhiều so với việc chỉ nói “nó hoạt động cho đại số”. Reading là phần hợp nhất với Lesson mode; còn Writing mang lại tín hiệu mental-model phong phú nhất (ngữ pháp và các kiểu viết có tính dự đoán rất cao ở người học có tiếng Việt là ngôn ngữ thứ nhất). SAT Math đã được tính đến trong thiết kế shared-node (nút dùng chung), nhưng chưa chắc sẽ được xây trong MVP-1.
+Mệnh đề mạnh mà MVP-1 theo đuổi là: **một engine duy nhất có thể tạo ra một mental graph hữu ích trên hai miền rất khác nhau** — dạy toán theo lối Socratic và huấn luyện ngôn ngữ kiểu Correct/Reinforce. Đây là một tuyên bố lớn hơn nhiều so với việc chỉ nói “nó hoạt động với đại số”. Reading là phần khớp với chế độ Lesson rõ ràng nhất; Writing mang tín hiệu mô hình tư duy phong phú nhất (các mẫu ngữ pháp và cách viết có tính dự đoán cao đối với người học có tiếng Việt là ngôn ngữ thứ nhất). SAT Math đã được tính đến trong thiết kế node dùng chung nhưng chưa chắc sẽ được xây trong MVP-1.
 
 ---
 
-## Engine-Validation PoC
+## PoC kiểm chứng Engine
 
-### Vì sao PoC được chạy trước
+### Vì sao PoC chạy trước
 
-Canh bạc thực sự chịu tải trong MVP-1 là belief-graph engine. Nếu xây xong toàn bộ Student SPA, auth (xác thực) và Console trước khi biết liệu engine có tạo ra tín hiệu hợp lệ hay không, chi phí và rủi ro sẽ rất lớn. Vì vậy MVP-1 chạy một PoC trước: **một học sinh thật dùng sản phẩm để làm assignment help (hỗ trợ bài tập)** (ban đầu là Math, sau đó là Physics), được triển khai qua **Claude skills (các kỹ năng Claude)** nói chuyện với engine qua một MCP, còn engine được triển khai lên một VPS. Không có Student SPA. Không có auth. Không có Console.
+Canh cược duy nhất mang tính quyết định trong MVP-1 là belief-graph engine. Nếu xây trọn Student SPA (ứng dụng SPA cho học sinh), auth (xác thực) và Console trước khi biết engine có tạo ra tín hiệu hợp lệ hay không thì sẽ rất tốn kém và rủi ro. Vì vậy MVP-1 chạy PoC trước: **một học sinh thật dùng sản phẩm để xin hỗ trợ bài tập** (Math trước, rồi đến Physics), được triển khai qua **Claude skills** trao đổi với engine qua một MCP, còn engine được triển khai lên VPS. Không có Student SPA. Không có auth. Không có Console.
 
-Việc cố ý gọi đây là PoC — chứ không phải “MVP-0” — là để giữ cho một điều luôn rõ ràng: **lớp vỏ bên ngoài có thể bỏ đi, còn dữ liệu của engine thì không.** Hướng làm UI của ứng dụng chỉ được dời lại cho tới sau PoC, chứ không bị hủy.
+PoC được cố ý gọi là PoC — chứ không phải “MVP-0” — để nhấn mạnh một điều: **lớp vỏ bên ngoài có thể bỏ đi, còn dữ liệu của engine thì không.** Nhánh UI ứng dụng được dời xuống sau PoC, chứ không bị hủy.
 
-### PoC vận hành ra sao: Claude làm Guide và Analyst
+### PoC vận hành thế nào: Claude làm Guide và Analyst
 
 Trong PoC, Claude đảm nhiệm cả hai vai trò tutor:
 
@@ -67,69 +65,69 @@ Student message
  └──────────┘
 ```
 
-- **Guide** điều hành buổi học theo từng lượt — trò chuyện với học sinh, đọc trực tiếp các tài liệu học sinh nộp lên (Claude đọc PDF và ảnh theo năng lực sẵn có; một bản chép lại mất mát chỉ làm giảm khả năng hiểu).
-- **Analyst** được kích hoạt tại các checkpoint (mốc kiểm tra) như một subagent (tác tử phụ). Nó suy luận trên tương tác rồi ghi evidence vào engine qua MCP.
+- **Guide** điều hành buổi học theo từng lượt — trò chuyện với học sinh, trực tiếp đọc tài liệu học sinh nộp (Claude vốn đọc được PDF và hình ảnh; việc chép lại theo kiểu mất mát chỉ làm giảm chất lượng hiểu).
+- **Analyst** được kích hoạt tại các checkpoint (mốc kiểm tra) như một subagent (tác tử con). Nó suy luận dựa trên tương tác, rồi ghi evidence vào engine qua MCP.
 
-Vì chỉ có một học sinh, Analyst chạy **đồng bộ**: học sinh gửi bài → Guide gọi Analyst → Analyst thêm evidence, engine tính lại belief state, trả về một Report → Guide tiếp tục. Async job runner (bộ chạy tác vụ bất đồng bộ), degraded-path fallback (đường lui khi hệ thống giảm cấp) và cơ chế xử lý Report-lag (độ trễ báo cáo) mà ứng dụng đầy đủ cần đến đều được bỏ khỏi PoC. Chúng chỉ được đưa trở lại khi xuất hiện concurrency (đồng thời) thực sự.
+Vì chỉ có một học sinh, Analyst chạy **đồng bộ**: học sinh nộp bài → Guide gọi Analyst → Analyst bổ sung evidence, engine tính lại belief state, trả về một Report → Guide tiếp tục. Async job runner, degraded-path fallback và cơ chế xử lý Report-lag mà ứng dụng đầy đủ cần tới đều bị lược bỏ trong PoC. Chúng chỉ được đưa trở lại khi có tải đồng thời thực sự.
 
-Cách làm này vẫn giữ nguyên kiến trúc hai tác tử thực sự (Guide trò chuyện, Analyst chẩn đoán và ghi belief), chỉ là Claude tạm thời lấp vào model slot. Master plan vốn đã xem model là một slot có thể thay thế, nên PoC này là một lần chạy thử hợp lệ cho orchestration (điều phối) — chứ không phải mẹo vá tạm.
+Thiết kế này giữ nguyên kiến trúc hai tác tử thực sự (Guide đối thoại, Analyst chẩn đoán và ghi beliefs), chỉ là Claude tạm thời đảm nhiệm vị trí model. Kế hoạch tổng thể vốn đã coi model là một swappable slot, nên PoC là một lần chạy thử orchestration hợp lệ chứ không phải mẹo vá víu.
 
-### MCP: append-only ngay từ thiết kế
+### MCP: append-only theo thiết kế
 
-MCP mà PoC mở ra cho Claude được cố ý làm theo hướng **append-only ở phía ghi**.
+MCP mà PoC mở ra cho Claude được cố ý thiết kế **append-only (chỉ cho phép nối thêm) ở phía ghi**.
 
 | Hướng công cụ | Công cụ |
 |---|---|
-| **Read** | `get_belief_state`, `match_catalog`, prior beliefs (niềm tin trước đó) |
+| **Read** | `get_belief_state`, `match_catalog`, prior beliefs |
 | **Write** | `append_evidence`, `propose_catalog_candidate` |
-| **Forbidden** | Bất kỳ công cụ nào cho phép đặt trực tiếp belief projection |
+| **Forbidden** | Bất kỳ công cụ nào cho phép đặt trực tiếp một belief projection |
 
-Không có công cụ nào cho phép Claude ghi trực tiếp kiểu “fragility = fragile”. Misconception (ngộ nhận), tín hiệu fragility (độ mong manh) và reasoning pattern (mẫu suy luận) đều luôn do mã của engine tính ra từ evidence log. Nếu MCP lộ ra một công cụ ghi kiểu “set belief”, trạng thái suy ra sẽ không còn được neo vào evidence có thể phát lại nữa — và toàn bộ bài kiểm chứng engine sẽ mất ý nghĩa. Giữ cho phía ghi là append-only chính là cách giúp dữ liệu của PoC vẫn đáng tin và có thể chuyển tiếp.
+Không có công cụ nào cho Claude ghi trực tiếp kiểu “fragility = fragile”. Misconception, tín hiệu fragility và các mẫu lập luận luôn được engine code tính từ evidence log. Nếu MCP lộ ra một công cụ ghi kiểu “set belief”, trạng thái suy ra sẽ không còn dựa trên evidence có thể phát lại — và toàn bộ bài kiểm chứng engine sẽ bị phá hỏng. Việc giữ cho các lượt ghi là append-only chính là điều khiến dữ liệu PoC còn đáng tin và có thể di chuyển sang giai đoạn sau.
 
-### Evidence theo checkpoint, không theo từng event
+### Evidence theo checkpoint, không theo từng sự kiện
 
-`append_evidence` nhận các event của một checkpoint dưới dạng **batch** và chỉ thêm vào — nó trả về một xác nhận, không hơn. Sau đó `get_belief_state` sẽ fold log tại thời điểm đọc. Trong PoC không có lời gọi “close checkpoint” riêng và cũng không có materialized projection table (bảng chiếu vật hóa); ở quy mô một học sinh, việc fold log trong mỗi lần đọc là miễn phí.
+`append_evidence` nhận các sự kiện của một checkpoint dưới dạng **batch** và chỉ append — nó chỉ trả về xác nhận, không hơn. Sau đó `get_belief_state` sẽ fold log tại thời điểm đọc. Trong PoC không có lời gọi “close checkpoint” riêng, cũng không có materialized projection table; ở quy mô một học sinh, việc fold log ở mỗi lần đọc gần như miễn phí.
 
-Vì sao lại gom theo checkpoint thay vì theo từng event? Phép fold của fragility cần tính gộp *cả* checkpoint. Một self-correction là `misconception_evidence(for)` và `probe_outcome(correct)` cùng xuất hiện trong một checkpoint và triệt tiêu lẫn nhau. Nếu tính lại sau từng event riêng lẻ, hệ thống sẽ chỉ thấy nửa checkpoint và tạo ra một tín hiệu trung gian sai.
+Vì sao gom theo checkpoint thay vì theo từng sự kiện? Fragility fold cần tính gộp *toàn bộ* một checkpoint. Một lần tự sửa là `misconception_evidence(for)` và `probe_outcome(correct)` trong cùng checkpoint, nên chúng triệt tiêu nhau. Nếu tính lại sau từng sự kiện riêng lẻ thì sẽ tạo ra tín hiệu trung gian sai vì mới chỉ nhìn thấy nửa checkpoint.
 
-Projection chỉ được materialize nếu log đủ lớn để việc fold lúc đọc trở nên chậm — điều mà quy mô một học sinh sẽ không bao giờ gặp.
+Projection chỉ được materialize nếu log đủ lớn để việc fold lúc đọc trở nên chậm — mà với một học sinh thì sẽ không bao giờ tới mức đó.
 
-### Serialize kết quả công cụ: bảo vệ đầu ra, không phải đầu vào
+### Tuần tự hóa kết quả công cụ: canh đầu ra, không phải đầu vào
 
-Mọi kết quả công cụ trong MCP adapter đều đi qua một lớp bọc dùng chung trước khi được đưa ra ngoài. Lớp bọc đó phải bảo vệ phần đầu ra đã được serialize — chứ không phải giá trị trả về của handler — và lý do nằm ở một chi tiết khá tinh vi.
+Mọi kết quả công cụ trong MCP adapter đều đi qua một lớp bao chung trước khi được gửi đi. Lớp bao này phải canh phần đầu ra đã tuần tự hóa — không phải giá trị mà handler trả về — và lý do thì khá tinh vi.
 
-`JSON.stringify` trả về *giá trị* `undefined` (không phải chuỗi) khi nhận `undefined`, một function hoặc một `Symbol`. Nó **không bao giờ ném lỗi** với cả ba trường hợp này, nên `try/catch` bọc quanh lời gọi sẽ không thấy điều gì bất thường. Nếu đoạn mã phía sau cứ mặc định rằng đã nhận về một chuỗi, nó sẽ phát ra một phản hồi lỗi định dạng và lỗi sẽ có vẻ như xuất phát từ nơi khác.
+`JSON.stringify` trả về giá trị `undefined` (không phải chuỗi) khi nhận `undefined`, một function hoặc một `Symbol`. Nó **không bao giờ throw** với các trường hợp đó, nên một `try/catch` bọc quanh lời gọi sẽ không thấy gì bất thường. Bất kỳ đoạn mã nào sau đó mặc định rằng mình đã nhận về một chuỗi đều sẽ phát ra phản hồi lỗi định dạng, và lỗi sẽ trông như xuất phát từ chỗ khác.
 
-Cách sửa dễ nghĩ ra nhất — `JSON.stringify(result ?? null)` — chỉ chặn được trường hợp handler không trả gì, vốn là lỗi thường gặp nhất. Nhưng nó vẫn bỏ ngỏ cả một lớp vấn đề: một function hoặc một `Symbol` sẽ đi qua phép kiểm `??` mà không bị đụng tới và vẫn serialize thành `undefined`. Cách phòng thủ đúng là kiểm tra **thứ thực sự đi ra**:
+Cách sửa tưởng như hiển nhiên — `JSON.stringify(result ?? null)` — chỉ chặn trường hợp handler không trả gì, vốn là lỗi được báo cáo nhiều nhất. Nhưng nó vẫn bỏ ngỏ cả nhóm lỗi còn lại: một function hoặc `Symbol` đi qua kiểm tra `??` mà không bị đụng tới và vẫn tuần tự hóa thành `undefined`. Cách phòng vệ đúng là canh **thứ được trả ra**:
 
 ```js
-// ✗ chỉ chặn trường hợp "không trả gì"
+// ✗ guards only the "nothing returned" case
 const body = JSON.stringify(result ?? null);
 
-// ✓ bao phủ mọi giá trị khiến JSON.stringify cho ra undefined
+// ✓ covers every value JSON.stringify turns into undefined
 const body = JSON.stringify(result) ?? 'null';
 ```
 
-Phương án dự phòng ở đây là JSON literal `"null"` — client vẫn parse được, và ý nghĩa cũng trung thực: “không có giá trị”, chứ không phải bịa ra một giá trị nào đó.
+Giá trị dự phòng là literal JSON `"null"` — phía client vẫn parse được và nó cũng trung thực: nghĩa là “không có giá trị”, thay vì bịa ra một giá trị khác.
 
-Trong PoC, quy tắc này nằm trong một lớp bọc duy nhất mà kết quả của mọi công cụ đã đăng ký đều phải đi qua, nên bất kỳ công cụ nào được thêm vào sau này cũng tự động được hưởng cùng một cơ chế, chứ không chỉ riêng `append_evidence` hiện tại. Bài học rộng hơn cũng áp dụng vượt ra ngoài adapter này: **một serializer báo lỗi bằng cách trả về một giá trị thay vì ném exception sẽ làm vô hiệu kiểu xử lý lỗi dựa trên exception.** Điểm kiểm tra phải nằm ở đầu ra, vì phía đầu vào không hề tự báo trước vấn đề.
+Trong PoC, quy tắc này nằm trong lớp bao duy nhất mà kết quả của mọi công cụ đã đăng ký đều đi qua, nên bất kỳ công cụ nào được thêm về sau cũng tự động được bảo vệ, chứ không chỉ riêng `append_evidence` ở hiện tại. Bài học rộng hơn cũng áp dụng ngoài adapter này: **một serializer báo lỗi bằng cách trả về một giá trị thay vì throw sẽ vô hiệu hóa kiểu xử lý lỗi dựa trên exception.** Kiểm tra phải nằm ở đầu ra, vì phía đầu vào không hề phát tín hiệu rằng có vấn đề.
 
 ### Hai bề mặt MCP: student và operator
 
-Phiên học của học sinh không được cầm các công cụ seed hay approve. Không phải vì lý do bảo mật — PoC chạy trong môi trường tin cậy và không có auth — mà để bảo vệ cổng **“AI drafts, human approves”**. Nếu Claude dạy học có trong tay công cụ `approve_candidate`, sớm muộn gì nó cũng sẽ gọi công cụ đó, đẩy một draft node thành trusted mà không qua người duyệt. Không có cơ chế replay nào cứu được chuyện này, vì việc promotion là một trạng thái trust chứ không phải một event được append thêm.
+Phiên học của học sinh không được cầm các công cụ seed hay approve. Không phải vì lý do bảo mật — PoC chạy trong môi trường tin cậy và không có auth — mà để bảo vệ cánh cổng **“AI soạn nháp, con người phê duyệt”**. Nếu Claude dạy học có trong tay công cụ `approve_candidate` thì sớm muộn gì nó cũng sẽ gọi công cụ đó, từ đó đẩy một node nháp thành node đáng tin mà không qua người duyệt. Không có cách phát lại nào sửa được chuyện này, vì việc promote là một trạng thái tin cậy chứ không phải một sự kiện được append.
 
-Lời giải nằm ở **configuration-time, không phải auth**: hai bề mặt MCP trên *cùng* các engine port.
+Giải pháp nằm ở **thời điểm cấu hình, không phải auth**: hai bề mặt MCP trên *cùng* một tập engine port.
 
-MCP process đọc biến môi trường `MCP_ROLE` **một lần khi khởi động** và chỉ đăng ký đúng một sơ đồ công cụ của một bề mặt trên MCP server. Các công cụ của bề mặt không được chọn sẽ không được đăng ký ngay từ đầu — chúng vắng mặt hoàn toàn khỏi phần tool discovery, chứ không chỉ bị từ chối khi gọi.
+Tiến trình MCP đọc biến môi trường `MCP_ROLE` **một lần duy nhất lúc khởi động** và chỉ đăng ký đúng bản đồ công cụ của một bề mặt lên MCP server. Các công cụ thuộc bề mặt không được chọn hoàn toàn không được đăng ký — chúng vắng mặt ngay từ khâu khám phá công cụ, chứ không chỉ bị từ chối khi gọi.
 
-| Bề mặt | Công cụ được mở ra |
+| Bề mặt | Công cụ được lộ ra |
 |---|---|
 | **student** | `append_evidence`, `propose_catalog_candidate`, `get_belief_state`, `match_catalog` |
 | **operator** | `approve_candidate`, `seed_node`, `seed_edge`, `seed_catalog`, `get_belief_state`, `match_catalog` |
 
-Nếu `MCP_ROLE` bị thiếu hoặc không hợp lệ, process sẽ **từ chối khởi động** — fail-closed ngay từ cấu trúc. Không có nhánh mã nào tạo ra một server đang chạy với một sơ đồ công cụ ngoài ý muốn.
+Nếu `MCP_ROLE` thiếu hoặc không hợp lệ, tiến trình sẽ **từ chối khởi động** — fail-closed ngay từ cấu trúc. Không tồn tại nhánh mã nào tạo ra một server đang chạy với bản đồ công cụ ngoài ý muốn.
 
-Việc triển khai gồm hai process từ cùng một image, chỉ khác nhau ở biến môi trường, và cả hai cùng kết nối tới một cơ sở dữ liệu.
+Việc triển khai là hai tiến trình từ cùng một image, chỉ khác nhau ở biến môi trường, và cả hai đều nối tới cùng một cơ sở dữ liệu.
 
 ```mermaid
 graph LR
@@ -138,45 +136,51 @@ graph LR
     E --> PG[("Postgres")]
 ```
 
-:::note[Trust boundary]
-Ranh giới vai trò được áp đặt bằng cấu hình và đường truyền là stdio — nên trust boundary thực sự là **ai là người khởi chạy process**. Điều này đúng với PoC, nơi tutoring skill tự khởi chạy process thuộc student surface của chính nó. Điều đó sẽ không còn đúng nếu dùng một đường truyền mạng dùng chung để phục vụ nhiều client từ một server, khi đó sẽ cần xác thực thật sự. Ứng dụng vẫn áp đặt cùng một sự tách biệt Console-và-Student bằng auth thật; thiết kế PoC này không cản trở điều đó.
+:::note[Ranh giới tin cậy]
+Vai trò được áp bằng cấu hình và tầng truyền là stdio — nên ranh giới tin cậy ở đây là **ai là người khởi chạy tiến trình**. Điều này đúng với PoC, nơi tutoring skill tự khởi chạy tiến trình student-surface của chính nó. Nó sẽ không còn đúng nếu dùng một tầng mạng chia sẻ phục vụ nhiều client từ một server, khi đó bắt buộc phải có xác thực thật sự. Ứng dụng cũng áp cùng sự tách biệt Console-vs-Student bằng auth thật — thiết kế PoC này không cản trở điều đó.
 :::
 
-Việc seeding diễn ra trước khi học sinh bắt đầu một chủ đề; còn việc phê duyệt candidate diễn ra giữa các phiên học — vì vậy các công cụ approve không bao giờ cần xuất hiện trên student surface.
+Việc seeding diễn ra trước khi học sinh bắt đầu một chủ đề; việc duyệt candidate diễn ra giữa các buổi học — vì vậy các công cụ approve không bao giờ cần xuất hiện trên bề mặt student.
 
-### Seeding nội dung: operator seed, AI draft, con người phê duyệt
+### Seeding nội dung: operator seed, AI soạn nháp, con người phê duyệt
 
-Trước khi học sinh dùng một chủ đề, concept graph (node + prerequisite edge) và các catalog (các misconception đã biết, các reasoning pattern) được operator seed vào hệ thống. Operator có thể làm việc này thủ công hoặc dùng một **seed skill** chuyên dụng: Claude đọc tài liệu học, dựng nháp node/edge/catalog entry dưới dạng **candidate**, rồi chỉ ghi hẳn sau khi operator phê duyệt. Không có gì do AI nháp ra mà tự động được tin cậy.
+Trước khi học sinh học một chủ đề, concept graph (node + các cạnh tiên quyết) và catalog (các ngộ nhận đã biết, các mẫu lập luận) sẽ được operator seed (khởi tạo sẵn). Operator có thể làm việc này thủ công hoặc dùng một **seed skill** chuyên biệt: Claude đọc tài liệu học, soạn node/edge/catalog entry dưới dạng **candidate**, và chỉ ghi bền vững sau khi operator phê duyệt. Không có gì do AI soạn nháp được tự động xem là đáng tin.
 
-Đồ thị đã seed được lưu trong Postgres của engine. Trong một phiên dạy học, Guide ánh xạ từng bài toán sang các node ID đã seed. Khi một bài toán chạm tới một khái niệm chưa được seed, Analyst sẽ đề xuất một candidate node — và operator sẽ phê duyệt nó trước phiên sau. Phiên học của học sinh không bao giờ tự tạo hay tự phê duyệt node.
+Đồ thị đã seed nằm trong Postgres của engine. Trong một buổi học, Guide ánh xạ từng bài toán sang các node ID đã seed. Khi một bài toán đụng tới khái niệm chưa được seed, Analyst sẽ đề xuất một candidate node — operator phê duyệt nó trước buổi học tiếp theo. Phiên học của học sinh không bao giờ tự tạo hoặc phê duyệt node.
 
-### Engine nhận gì: một thin anchor (neo mỏng), không phải nội dung tài liệu
+### Engine nhận gì: một anchor mỏng, không phải nội dung tài liệu
 
-Engine không bao giờ nhìn thấy các phương trình, bảng biểu hay sơ đồ trong tài liệu của học sinh. Thứ nó cần chỉ là **stable node identity** để treo evidence lên. Claude đọc tài liệu gốc (PDF, ảnh) và hướng dẫn học từ đó; sau đó nó chuyển cho engine một **problem anchor (neo bài toán)** mỏng:
+Engine không bao giờ nhìn thấy phương trình, bảng biểu hay sơ đồ trong tài liệu của học sinh. Thứ nó cần chỉ là **định danh node ổn định** để treo evidence lên. Claude đọc trực tiếp tài liệu gốc (PDF, hình ảnh) và hướng dẫn từ đó; rồi nó chuyển cho engine một **problem anchor** mỏng:
 
 ```json
 { "id": "prob_001", "label": "Quadratic roots — discriminant", "nodeRefs": ["node_alg_quad_discriminant"] }
 ```
 
-Cùng một bộ node ID đi xuyên suốt qua anchor, từng event evidence và các belief suy ra — đó là sợi chỉ duy nhất mà engine cần. Một định dạng nội dung có cấu trúc phong phú hơn (cho sơ đồ, bảng, phương trình) là một ý tưởng tốt, nhưng nó thuộc về cổng thiết kế nội dung của ứng dụng, nơi sau này sẽ có một renderer thực sự sử dụng nó. PoC không xây bất kỳ structured content contract nào.
+Cùng các node ID đó chạy xuyên suốt qua anchor, từng evidence event và các belief suy ra — đó là sợi dây duy nhất engine cần. Một định dạng nội dung có cấu trúc phong phú hơn (cho sơ đồ, bảng, phương trình) là ý tưởng tốt, nhưng nó thuộc về cổng thiết kế nội dung của ứng dụng, nơi về sau sẽ có renderer tiêu thụ nó. PoC không xây dựng hợp đồng nội dung có cấu trúc nào cả.
 
-Hình dạng của anchor được định nghĩa bằng một JSON Schema trong `packages/contracts` (gói shared-types), theo cùng quy ước như mọi cross-module contract khác. Trong PoC, nó **không có trường `schemaVersion`**: một trường phiên bản chỉ thực sự đáng tồn tại khi hai chương trình được triển khai độc lập có thể bất đồng về định dạng. Ở đây, bên tạo và bên nhận chạy trong cùng một process, nên không có độ lệch nào cần phòng ngừa. Có thể thêm trường phiên bản nếu anchor sau này thật sự đi qua một deployment boundary — điều mà kiến trúc monolith không tạo ra.
+Hình dạng của anchor được định nghĩa bằng JSON Schema trong `packages/contracts` (gói shared-types), theo đúng quy ước đang áp dụng cho mọi hợp đồng xuyên mô-đun khác. Trong PoC nó **không mang trường `schemaVersion`**: một trường phiên bản chỉ đáng có khi hai chương trình triển khai độc lập có thể bất đồng về định dạng. Ở đây bên tạo và bên nhận chạy trong cùng một tiến trình, nên không có lệch phiên bản nào cần phòng vệ. Có thể thêm trường phiên bản nếu anchor sau này thật sự đi qua một ranh giới triển khai — điều mà kiến trúc monolith không hề tạo ra.
+
+### GitHub remote và đường đi tới triển khai VPS
+
+Đến hết Sprint 10, `engine-poc` vẫn chỉ chạy cục bộ — việc tạo GitHub remote và nối dây triển khai VPS được lên lịch cho Sprint 11. Điều này có nghĩa là các tiêu chí chấp nhận của CI (một lỗi lint làm workflow đỏ; `main` sạch làm workflow xanh) chỉ có thể được kiểm chứng bằng cách chạy tuần tự từng lệnh ở máy cục bộ, chứ không thể quan sát một lần chạy GitHub Actions thật, vì không có nơi nào để push.
+
+Tại buổi review Sprint 10, `stemolly/engine-poc` (private) đã được tạo và `main` được push lên thành `origin`. Sau đó cả hai job CI đều được quan sát chuyển xanh trên một lần push thật; đồng thời một PR tạm với lỗi lint được cố ý tạo ra để xác nhận workflow chuyển đỏ ở bước `Lint` — nhờ đó khoảng trống kiểm chứng được khép lại trực tiếp, chứ không phải gián tiếp. Công việc triển khai VPS của Sprint 11 được xây tiếp trên remote đã có sẵn này; không cần tạo lại repository.
 
 ---
 
-## Phần nào bền vững, phần nào có thể bỏ
+## Phần nào bền vững, phần nào có thể bỏ đi
 
-Cách đóng khung này chi phối toàn bộ các quyết định về sau:
+Khung nhìn chi phối mọi quyết định về sau:
 
-| Tầng PoC | Độ bền |
+| Lớp PoC | Độ bền vững |
 |---|---|
-| Claude skills (Guide / Analyst) | Có thể bỏ — sẽ được thay bằng harness nội bộ khi ứng dụng phát hành |
-| MCP adapter | Có thể bỏ — một adapter điều khiển mỏng, sẽ được thay bằng `api`/`tutor` của ứng dụng |
-| Engine module (`packages/engine`) | **Bền vững** — được xây cho sản phẩm thật và tái sử dụng nguyên trạng khi ứng dụng phát hành |
-| Postgres schema (`nodes`, `edges`, `evidence_events`) | **Bền vững** — được chuyển sang ứng dụng qua `pg_dump`, không phải viết lại |
-| Evidence log | **Bền vững** — lịch sử belief của học sinh không được phép mất đi khi em chuyển sang ứng dụng |
+| Claude skills (Guide / Analyst) | Có thể bỏ đi — sẽ được thay bằng bộ khung nội bộ khi ứng dụng phát hành |
+| MCP adapter | Có thể bỏ đi — adapter điều khiển mỏng, sau này được thay bằng `api`/`tutor` của ứng dụng |
+| Engine module (`packages/engine`) | **Bền vững** — được xây nghiêm túc để dùng thật, tái sử dụng nguyên trạng khi ứng dụng phát hành |
+| Postgres schema (`nodes`, `edges`, `evidence_events`) | **Bền vững** — được đưa vào ứng dụng bằng `pg_dump`, không phải viết lại |
+| Evidence log | **Bền vững** — lịch sử belief của học sinh không được phép mất đi khi chuyển sang ứng dụng |
 
-Việc lịch sử belief của học sinh còn nguyên khi chuyển từ PoC sang ứng dụng là một **yêu cầu bắt buộc**. Chính yêu cầu đó buộc engine phải được xây ngay từ bây giờ trên schema thật, chứ không phải một nơi lưu trữ tạm. Nó cũng buộc MCP chỉ là một adapter mỏng bọc quanh các port của engine — chính là slot port mà lớp API của ứng dụng sau này sẽ chiếm vào. Khi ứng dụng xuất hiện, chỉ adapter điều khiển được thay; mã nguồn của engine và dữ liệu của nó vẫn giữ nguyên.
+Việc lịch sử belief của học sinh sống sót qua quá trình chuyển từ PoC sang ứng dụng là một **yêu cầu cứng**. Chính yêu cầu đó buộc engine phải được xây ngay bây giờ trên schema thật, chứ không phải một kho lưu trữ dùng rồi bỏ. Nó cũng buộc MCP phải chỉ là một adapter mỏng phủ lên các port của engine — cũng chính vị trí port mà về sau lớp API của ứng dụng sẽ đảm nhiệm. Khi ứng dụng xuất hiện, chỉ adapter điều khiển được thay; mã engine và dữ liệu của nó vẫn giữ nguyên.
 
 ```mermaid
 graph LR
@@ -191,12 +195,12 @@ graph LR
     DB -.->|"pg_dump"| DB2
 ```
 
-MCP và Claude skills là cái miệng tạm thời có thể thay. Engine — mã nguồn của nó, schema của nó, append-only evidence log của nó — mới là sản phẩm thật, chỉ đang mang một “cái miệng” khác trong lúc ứng dụng được xây.
+MCP và Claude skills là cái miệng có thể thay thế. Engine — mã nguồn, schema và evidence log append-only của nó — mới là sản phẩm thật, chỉ đang mang một cái miệng khác trong lúc ứng dụng được xây.
 
 ---
 
 ## Các trang liên quan
 
-- [Mô hình nhận thức và kiến trúc của engine](../engine/mental-model.md)
-- [Tutor agent: Guide và Analyst](../engine/tutor-agent.md)
-- [Belief graph và evidence](../engine/belief-graph.md)
+- [Mô hình tư duy và kiến trúc của Engine](../engine/mental-model.md)
+- [Tác tử tutor: Guide và Analyst](../engine/tutor-agent.md)
+- [Đồ thị niềm tin và evidence](../engine/belief-graph.md)

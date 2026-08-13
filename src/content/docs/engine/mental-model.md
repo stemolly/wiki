@@ -133,4 +133,4 @@ In the MVP, the belief graph runs entirely in the background. There is no screen
 
 The graph is visible only in the **Console's Observe area**. In MVP-1, the primary audience is the Stemolly team, who use it to confirm the engine is working correctly. Showing the graph to students is deferred and treated as a later UX concern, not a technical constraint.
 
-For details on how the engine updates the graph during a session, see [Engine Implementation](./engine-impl.md). For how the graph's accuracy is checked, see [Engine Validation](./engine-validation.md).
+For details on how the engine updates the graph during a session, see [Engine Implementation](./engine-impl/). For how the graph's accuracy is checked, see [Engine Validation](./engine-validation.md).

@@ -1,14 +1,14 @@
 ---
-title: Bộ máy mô hình tư duy
-description: Đồ thị niềm tin ba lớp, cách nó được triển khai bằng append-only event sourcing (ghi nhận theo chuỗi sự kiện chỉ thêm vào), và cách độ chính xác của nó được kiểm chứng.
+title: Bộ máy mô hình tinh thần
+description: Đồ thị niềm tin ba tầng, cách nó được hiện thực bằng event sourcing (ghi nhận theo sự kiện) chỉ ghi thêm, và cách độ chính xác của nó được kiểm chứng.
 ---
 
-Đồ thị niềm tin là USP (điểm khác biệt cốt lõi) của Stemolly. Phần này trình bày nó là gì, được xây dựng ra sao, và độ chính xác của nó được kiểm chứng như thế nào.
+belief graph (đồ thị niềm tin) là USP (điểm khác biệt cốt lõi) trung tâm của Stemolly. Phần này giới thiệu nó là gì, được xây dựng như thế nào, và độ chính xác của nó được kiểm chứng ra sao.
 
 ## Chủ đề
 
-**[Thiết kế mô hình tư duy](./mental-model.md)** — Mô hình ba lớp (misconceptions (ngộ nhận), fragility (độ vững của hiểu biết), reasoning patterns (mẫu hình lập luận)), cách beliefs (niềm tin) được cấu trúc thành các event-sourced evidence streams (luồng bằng chứng ghi nhận theo sự kiện), và thiết kế lưu trữ (một đồ thị thống nhất cho mỗi học sinh, với định danh lai cho misconceptions và patterns).
+**[Thiết kế mô hình tinh thần](./mental-model.md)** — Mô hình ba tầng (misconceptions, fragility, reasoning patterns), cách các belief được tổ chức thành evidence streams (luồng bằng chứng) theo kiểu event-sourced (ghi nhận theo luồng sự kiện), cùng thiết kế lưu trữ (một unified graph cho mỗi học sinh, với hybrid identity cho misconceptions và patterns).
 
-**[Triển khai engine](./engine-impl.md)** — Cách đồ thị được hiện thực hóa về mặt kỹ thuật: append-only event logs (nhật ký sự kiện chỉ thêm vào), tách CQRS (phân tách lệnh và truy vấn) giữa phía ghi và phía suy diễn, ba projectors (bộ chiếu suy diễn: fragility FSM, misconception FSM, pattern accumulator), cùng các vấn đề mở đã biết (ordering, alias merge, edge validation, pattern valence).
+**[Triển khai engine](./engine-impl.md)** — Cách đồ thị được hiện thực về mặt kỹ thuật: append-only event logs (nhật ký sự kiện chỉ ghi thêm), cách tách CQRS giữa phía ghi và phía suy diễn, ba projectors (bộ chiếu dữ liệu), mô hình nút với ba định danh (uuid/slug/display) cùng kỷ luật phân giải alias-merge, độ tin cậy và vòng đời của catalog, và các vấn đề mở đã biết (ordering, catalog ref validation, alias coverage).
 
-**[Kiểm chứng engine](./engine-validation.md)** — Cách Stemolly chứng minh mô hình này thực sự đúng: groundedness precision (độ chính xác theo bằng chứng nền tảng) và predictive validity (độ hiệu lực dự báo) là hai thước đo chính, chiến lược tự động hóa LLM-as-judge (dùng LLM làm bộ chấm), và kỷ luật cần có để giữ cho các thước đo đó đáng tin cậy.
+**[Kiểm chứng engine](./engine-validation.md)** — Cách Stemolly chứng minh mô hình thực sự đúng: groundedness precision (độ chính xác về mức độ bám sát căn cứ) và predictive validity (độ giá trị dự báo) là hai thước đo, chiến lược tự động hóa LLM-as-judge (dùng LLM làm bộ đánh giá), cùng kỷ luật cần thiết để giữ các thước đo đó đáng tin cậy.

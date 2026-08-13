@@ -1,159 +1,146 @@
 ---
 title: Core Architecture
-description: Evolvability as primary NFR, monorepo topology, modular monolith, TypeScript stack, and four-pillar governance.
+description: "How Stemolly is structured — a monorepo, a single deployable, a modular monolith backend, a TypeScript stack, and a four-pillar governance model — all shaped by one primary goal: staying easy to change."
 ---
 
-Stemolly's architecture is built around one primary goal: **staying cheap to change**. MVP-1 is a validation instrument — it exists to test the belief-graph engine against real learners, and the team should expect to be wrong on specifics and to rewire based on what they discover. Everything in this document — the monorepo layout, the single-process backend, the language choice, the governance model — flows from that single requirement.
+Stemolly is designed to be easy to change. That goal — called *evolvability* — is the primary non-functional requirement, and it drives every structural choice described on this page. Understanding why the architecture looks the way it does starts there.
 
----
+## One Monorepo, One Deployable
 
-## Evolvability as the Primary NFR
+The project serves two audiences: students and the internal team (Console users). These are separate web apps with separate UIs, but they share a domain — Console authors the briefs that student sessions consume, and sessions write evidence the Console then observes. Splitting them into two separate backends would only make sense if the data were also separate, and it isn't.
 
-A non-functional requirement (NFR) is a quality the system must have beyond just "does the feature work" — things like speed, security, or maintainability. For Stemolly, the primary NFR is **evolvability**: the architecture must be cheap to extend (add subjects, modes, pedagogies) and cheap to pivot (change direction mid-validation).
+So the structure is:
 
-This shapes the decisions concretely:
+```
+monorepo
+├── apps/student         ← Vite + React SPA
+├── apps/console         ← Vite + React SPA
+├── packages/contracts   ← shared JSON Schema + generated TypeScript types
+└── server               ← one Fastify backend process
+```
 
-- The **engine core** must stay untouched when pedagogy or subject changes.
-- **Pedagogy** is a pluggable per-session strategy, not baked in.
-- **Node identity and graph structure** are chosen so new subjects and curricula slot in without a rebuild.
+All three runtime artifacts — nginx, the server image, and Postgres — ship together as **one deployable**. A multi-repo layout was rejected because the `contracts` package is imported by both frontends and the server; keeping everything in one repo means cross-cutting contract changes are atomic and type-checked in a single pull request.
 
-The technology stack is not a product requirement — it is an architecture decision, made at the right altitude and for explicit reasons, which the rest of this page explains.
+Two backends (for blast-radius isolation) were also considered and stay on the table as an extraction seam. They become worthwhile once the Console gains external users or the Student app opens self-serve registration — but at current scale the split would not actually reduce risk without also splitting the database credentials, and the cost to agility would be immediate.
 
----
+## The Backend: a Modular Monolith
 
-## What You Are Building On: One Monorepo, One Deployable
+The server is **one process** containing modules with strict boundaries. There is no microservices split, no network between modules. The modules are:
 
-The project lives in a single **pnpm workspace monorepo** and ships as a single deployable unit. Here is what that looks like at runtime:
+`engine`, `tutor`, `pedagogy`, `content`, `identity`, `llm`, `judge`, `authoring-ai`, `metering`, `jobs`, `api`
+
+Boundaries are enforced by **dependency lint** (`dependency-cruiser` + `eslint-boundaries`), not by the network. The `engine` module imports nothing upward; no module reaches deep into another. This lint check must be CI-blocking from the first sprint — if it can be bypassed, the entire model collapses.
 
 ```mermaid
 graph TD
-    nginx["nginx<br/>(one deployable)"]
-    student["Student SPA<br/>Vite + React"]
-    console["Console SPA<br/>Vite + React"]
-    api["Fastify backend<br/>(one process)"]
-    pg["PostgreSQL"]
-    contracts["contracts package<br/>JSON Schema + types"]
-
-    nginx -->|"serves bundle"| student
-    nginx -->|"serves bundle"| console
-    nginx -->|"proxies /api/*"| api
-    api --> pg
-    contracts -.->|"imported by"| student
-    contracts -.->|"imported by"| console
-    contracts -.->|"imported by"| api
+    api_layer["api layer<br/>(Fastify plugins)"]
+    tutor
+    engine["engine<br/>(imports nothing upward)"]
+    identity
+    llm
+    content
+    api_layer --> tutor
+    api_layer --> identity
+    api_layer --> content
+    tutor --> engine
+    tutor --> llm
+    llm --> engine
 ```
 
-There are **two SPAs** because the Student app and the Console serve different audiences — students vs. the internal team. That difference is a frontend fact. The backend is shared because the domain is shared: the Console authors briefs that Student sessions consume, and sessions write evidence that the Console observes.
+Why not microservices? The core domain concepts — briefs, evidence, reports — interact across every module. Any pivot that crosses a seam would become a multi-repo, multi-deploy, contract-versioned change. At current scale, **distribution fights the primary evolvability goal.** The seams are intentionally visible so a team can extract a service later when a measured constraint (traffic, team size, isolation need) actually justifies the cost.
 
-The backend exposes one API with four namespaces:
+## API Surface: Four Namespaces
 
-| Namespace | Access |
-|---|---|
-| `/api/student/*` | Role-gated to student callers |
-| `/api/console/*` | Role-gated to console users |
-| `/api/admin/*` | Role-gated to admins |
-| `/api/auth/*` | Ungated — login and invite routes run before a role exists |
+The single backend exposes four namespaces:
 
-**Why not two backends or two deployables?** Blast-radius isolation only works if database credentials also split. At MVP scale, the exposed surface is already the least-privileged one. The seam for a future split is left explicit and can be extracted when a measured constraint forces it — external Console users, or self-serve Student registration.
+| Namespace | Who can call it | Gated? |
+|---|---|---|
+| `/api/student/*` | Student app | ✅ role-scoped, deny by default |
+| `/api/console/*` | Console app | ✅ role-scoped, deny by default |
+| `/api/admin/*` | Internal admins | ✅ role-scoped, deny by default |
+| `/api/auth/*` | Anyone (pre-session) | ❌ deliberately ungated |
 
-**Why not multiple repos?** The shared `contracts` package (JSON Schema + generated TypeScript types) is imported by both frontends and the server. A monorepo keeps high-churn contract changes atomic and type-checked across all three consumers in one commit.
+The `/api/auth/*` namespace is ungated because its endpoints — login, accept-invite — run before a caller has a role. All other namespaces are deny-by-default; a request with the wrong role is rejected at the prefix level before it reaches any handler.
 
----
+## The Stack: TypeScript End-to-End
 
-## One Process, Strict Boundaries: The Modular Monolith
-
-The backend is one OS process. It is not a set of microservices. But it is not a big ball of mud either — it is a **modular monolith**: a single process containing modules with boundaries enforced by tooling.
-
-The modules are: `engine`, `tutor`, `pedagogy`, `content`, `identity`, `llm`, `judge`, `authoring-ai`, `metering`, `jobs`, and `api`. The rules are simple:
-
-- The `engine` module imports nothing upward.
-- No deep cross-module imports — modules talk through defined interfaces.
-
-These rules are enforced by `dependency-cruiser` and `eslint-boundaries` in CI, not by your discipline. The lint must be CI-blocking from the first sprint; without it, nothing physically prevents a boundary violation.
-
-**Why not microservices?** Because distribution at this stage directly fights the primary NFR.
-
-Think of it this way: briefs, evidence, and reports interact everywhere. Every pivot that crosses a module seam — moving a field from a brief to a session, say — would become a multi-repo, multi-deploy, contract-versioned change in a microservices world. At tens-of-students scale, that overhead buys no measurable benefit and costs a great deal of agility.
-
-The service-extraction seams are left explicit. When a measured constraint appears — scale, isolation, team structure — a module can be promoted to a service. Until then, keep them in one process.
-
----
-
-## The Tech Stack: TypeScript End-to-End
-
-Every layer of the system uses TypeScript. This is not a default choice — it is an explicit decision for a specific reason: the `contracts` package sits at the seam between frontends and backend. A shared language means a type error anywhere in that seam fails a single build, not a cross-language integration test.
-
-| Layer | Technology |
-|---|---|
-| Student SPA | Vite + React + TypeScript |
-| Console SPA | Vite + React + TypeScript |
-| Backend | Fastify + TypeScript |
-| Shared contracts | JSON Schema + generated types |
-| Database | PostgreSQL (thin SQL layer) |
-| Monorepo tooling | pnpm workspaces |
-
-**Why Fastify and not Express?** Fastify offers native per-route JSON-Schema validation — exactly the contracts strategy the design mandates. Its prefix-scoped encapsulated plugins map one-to-one onto the role-gated API namespaces. It is an explicit router with no meta-framework magic, which is what you want when you need predictable control flow.
-
-**Why not Next.js or Remix?** Both hide control flow and offer SSR, which has no benefit for two auth-walled SPAs. The opacity is a cost, not a feature.
-
-**Why not a Python backend?** LLM use in Stemolly is API orchestration, not local model inference. A Python backend would split the language across the highest-churn seam in the project — the contracts package — for no runtime gain.
-
-**Why no heavy ORM?** Append-only tables use database triggers, and some queries use recursive CTEs (common table expressions). Both need to be legible SQL. A heavy ORM layer obscures them.
-
----
-
-## Keeping It Honest: The Four-Pillar Governance Model
-
-Good intentions drift. The governance model exists to keep the evolvability NFR true during implementation, not just at design time.
-
-The architecture is documented and enforced through four pillars:
+Every layer uses TypeScript. The shared `contracts` package is the connective tissue: it publishes JSON Schema definitions and generated TypeScript types, imported by both frontends and the server.
 
 ```mermaid
 graph LR
-    ADR["ADRs<br/>concrete choices<br/>+ rejected options"]
-    Principles["Design Principles<br/>the philosophy that<br/>generates decisions"]
-    Rules["Design Rules<br/>hard, checkable constraints<br/>each citing a principle"]
-    Structure["Architecture Structure<br/>style, modules, runtime,<br/>data, deployment"]
-
-    Principles --> ADR
-    Principles --> Rules
-    Rules --> Structure
-    ADR --> Structure
+    student["Student SPA<br/>(Vite + React)"]
+    console_app["Console SPA<br/>(Vite + React)"]
+    contracts["contracts package<br/>(JSON Schema + types)"]
+    server_node["Fastify server"]
+    student --> contracts
+    console_app --> contracts
+    server_node --> contracts
 ```
 
-**ADRs** (Architecture Decision Records) capture concrete choices with their rejected alternatives — including the reasoning behind each rejection. Adding a module, datastore, external service, or process boundary requires a new ADR.
+**Fastify** was chosen over Express (an earlier assumption) for two concrete reasons: native per-route JSON Schema validation matches exactly how the `contracts` package works, and prefix-scoped encapsulated plugins map directly onto the four API namespaces. It is an explicit router with no meta-framework magic.
 
-**Design principles** are the philosophy that generates decisions. They are not rules — they are the "why" behind the rules.
+Alternatives that were rejected:
 
-**Design rules** are hard, checkable constraints. Each rule cites the principle it enforces. Rules without a way to check them are not rules.
+- **Next.js / Remix** — hidden control flow; no SSR benefit for two auth-walled apps.
+- **Python + FastAPI** — splits the language across the high-churn contracts seam; the LLM usage here is API orchestration, not local ML inference.
+- **Heavy ORMs** — rejected to keep append-only DB triggers and recursive CTEs readable as plain SQL.
 
-**Architecture structure** describes style, modules, runtime, data, and deployment — the shape of the thing at any given moment.
+## Governance: Four Pillars
 
-Drift is prevented by **fitness functions**: automated checks ordered from strongest to weakest:
-
-1. **Machine-in-CI** — dependency lint for module boundaries, grep deny-lists for vendor or domain leakage.
-2. **Runtime-enforced** — database triggers for append-only tables, runtime assertions in the LLM gateway.
-3. **Human process** — ADR reviews for structural changes.
-
-Every design rule maps to at least one fitness function. If you cannot automate the check, the rule is treated as weaker than one you can.
-
-**Cross-cutting concerns** — auth, errors, logging, idempotency, config, resilience — are decided at the architecture phase (their seam and invariant are fixed), then filled with specifics at design time. Deferring them entirely lets each module choose differently, which is how you end up with five inconsistent error formats.
-
----
-
-## The Shape at a Glance
+The architecture is kept honest through four layers of documentation and enforcement. The governance model exists specifically to keep the evolvability goal true during implementation, not just at design time.
 
 ```mermaid
-graph TD
-    NFR["Primary NFR: Evolvability"]
+flowchart TD
+    P["Design Principles<br/>(philosophy — why)"]
+    A["ADRs<br/>(concrete choices — what and why not)"]
+    R["Design Rules R-*<br/>(hard, checkable constraints)"]
+    S["Architecture Structure<br/>(modules, runtime, data, deployment)"]
+    FF["Fitness Functions<br/>(machine-enforced in CI)"]
 
-    NFR --> mono["Modular Monolith<br/>one process, lint-enforced boundaries"]
-    NFR --> monorepo["Monorepo<br/>atomic contract changes"]
-    NFR --> ts["TypeScript end-to-end<br/>shared contracts package"]
-    NFR --> gov["Four-pillar governance<br/>drift → fitness functions"]
-
-    mono --> seams["Extraction seams left explicit"]
-    monorepo --> topo["Two SPAs + one backend<br/>one deployable"]
+    P --> A
+    P --> R
+    R --> FF
+    A --> R
 ```
 
-Every structural choice traces back to the same root: MVP-1 must be cheap to change. The monolith keeps pivots cheap today. The explicit seams mean you can extract a service when a real constraint forces it. The shared language keeps the contracts seam type-safe. The governance model keeps the boundaries honest as the codebase grows.
+- **Design Principles** — the philosophy; the "why" that generates every decision.
+- **ADRs** — capture a concrete choice and list what was rejected and why. Adding a module, datastore, external service, or process boundary requires an ADR.
+- **Design Rules (`R-*`)** — hard, checkable constraints, each citing a principle. Every rule maps to at least one fitness function.
+- **Architecture Structure** — the living record of modules, runtime behaviour, data model, and deployment.
+
+**Fitness functions** are the enforcement layer, ordered by strength:
+
+1. **Machine in CI** (strongest) — dependency-lint for module boundaries, a grep deny-list for vendor/domain leakage.
+2. **Runtime-enforced** — DB triggers for append-only tables, runtime assertions in the LLM gateway.
+3. **Human process** (fallback) — manual review where automation is not yet practical.
+
+Cross-cutting concerns — auth, errors, logging, idempotency, config, resilience — are decided at the architecture phase (seam and invariants fixed), then filled in with specifics only at design time. Deferring them any later lets individual modules choose differently, creating the kind of inconsistency that is expensive to unwind.
+
+### What Belongs in an ADR — and What Doesn't
+
+An ADR's body is **immutable** in this project. Changing a decision means writing a new ADR that supersedes the old one, never editing the original. This immutability creates a precise rule about what can appear in an ADR's *Decision* section.
+
+:::caution[Filenames and paths do not belong in an ADR]
+If a filename appears in an ADR's Decision section, renaming that file makes an accepted record literally false. The only remedy is a supersession — expensive ceremony for what may be a routine rename.
+:::
+
+The division that avoids this:
+
+- **ADRs name roles and invariants.** Example: "the driving contract never imports the driven contracts."
+- **Design rules (`R-*`) name the files** that hold those roles. Example: R-28 lists `core/driving.ts`, `core/driven.ts`.
+
+Rules are amended in ordinary work — a rule's file list can change without touching the ADR it backs. Layout evolves at rules speed; the decision record stays truthful.
+
+ADR-023 demonstrated the failure by writing a specific directory layout into its Decision section. Any later rename contradicted an accepted record, forcing a supersession. ADR-029 was written to the principle above instead: five roles, no filenames, with R-28 and R-30 carrying the paths.
+
+### ADR Scope: Boundaries, Not Transports
+
+An ADR is binding on work that outlives the sprint that wrote it. Its `Scope` line must therefore name a **durable boundary**, not a temporary artifact that will be replaced.
+
+The PoC's MCP surface is an example of a temporary artifact: it is the current carrier of the model-facing engine boundary, but the full app replaces it with an in-process `tutor` → `engine` call. The engine and its schema are the durable part. An ADR scoped to the MCP files becomes silently void once the PoC is retired.
+
+The correct way to write scope:
+
+> *"The engine module's model-facing boundary, whichever transport carries it: the PoC's MCP tool surface today, the in-process checkpoint-job call later."*
+
+Findings drawn from a temporary artifact belong in the `Evidence` section — they read as observations about the current instance rather than as the permanent limit of what the decision governs. The rule of thumb: **if an identifier can be retired on a schedule, it cannot appear in a document that outlives schedules.** Boundaries and capabilities survive a rewrite; file paths into a disposable shell do not.

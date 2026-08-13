@@ -89,7 +89,7 @@ Each prediction carries a `basis` — either the fragility state of a belief-gra
 
 Scoring both metrics by hand at scale is impractical. The solution is an **LLM-as-judge**: a language model that reads the transcript and grades the engine's output automatically.
 
-Consistent with Stemolly's LLM-agnostic design (see [engine implementation](./engine-impl.md)), the judge can be any suitable model chosen by cost and difficulty — there is no fixed vendor. For predictive validity, the LLM's job is limited to grading the outcome (did the student truly understand, or did they just guess?). The core of the metric — the before/after comparison against a pre-committed prediction — is objective and does not require a judgment call.
+Consistent with Stemolly's LLM-agnostic design (see [engine implementation](./engine-impl/)), the judge can be any suitable model chosen by cost and difficulty — there is no fixed vendor. For predictive validity, the LLM's job is limited to grading the outcome (did the student truly understand, or did they just guess?). The core of the metric — the before/after comparison against a pre-committed prediction — is objective and does not require a judgment call.
 
 ```mermaid
 flowchart LR
