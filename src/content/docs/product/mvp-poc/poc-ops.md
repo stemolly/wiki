@@ -1,9 +1,9 @@
 ---
 title: Running & Deploying the PoC
-description: How to drive the PoC's MCP over HTTP locally, the wire-boundary bugs found while hardening it, and how the PoC is hosted and deployed.
+description: How to drive the PoC's MCP over HTTP locally, the wire-boundary bugs found while hardening it, and the full VPS deployment including hostnames, SSH-tunnel migrations, and backup-restore verification.
 ---
 
-The PoC's engine is only useful if Claude can actually reach it. This page covers the practical side: how to run and exercise the MCP server yourself, the bugs the team found (and had to fix) while making its HTTP transport solid, and how the whole thing is hosted and deployed.
+The PoC's engine is only useful if Claude can actually reach it. This page covers the practical side: how to run and exercise the MCP server yourself, the bugs the team found (and had to fix) while making its HTTP transport solid, and how the whole thing is hosted and deployed — including public hostnames, running migrations over an SSH tunnel, and proving that backups actually work.
 
 ## Running the MCP server over HTTP, end to end
 
@@ -49,18 +49,61 @@ While hardening the same wire boundary, the team also found a subtler defect in 
 
 Guarding the *input* (`JSON.stringify(result ?? null)`) only catches the "handler returned nothing" case and leaves the rest of the problem open. The fix guards the *output* instead: `JSON.stringify(result) ?? 'null'`, falling back to the literal string `'null'` — a value the client can actually parse, and one that honestly means "no value" instead of inventing something else. This check now sits in the one shared wrapper that every tool result passes through, so it protects any tool added later, not just the ones that exposed the bug originally. The general lesson: a serializer that signals failure by quietly returning a value, instead of throwing, defeats any error handling built around catching exceptions — the check has to live on what comes *out*, because nothing on the way in warns you.
 
-## Hosting and deployment
+## Hosting the PoC repository
 
 `engine-poc` started life with no GitHub remote at all — pushing it and wiring up VPS deployment were both planned for a later sprint. That meant its CI workflow could only be checked by running the same commands locally, in order, as a stand-in for a real pipeline — there was nowhere to push to and no way to watch an actual run. At review, the team created the private `stemolly/engine-poc` repository and pushed the existing local history as `origin`, specifically to close that gap: both CI jobs were then watched turning green on a real push, and a throwaway pull request with a deliberate lint mistake was watched turning the `Lint` job red — confirming the workflow live instead of by proxy. VPS deployment work builds on this existing repository rather than creating it fresh.
 
-On the deployed VPS stack, every service sits behind a reverse-proxy edge and is reachable only on the loopback address (`127.0.0.1`) — nothing but the edge's port is visible from outside. Postgres carves out one narrow, deliberate exception to that rule: it also publishes on loopback, even though nothing ever proxies it. The reason is a tooling limitation, not a design preference — the migration tool needs a loader that is unsafe to run inside a long-lived container process, so no container in the stack is able to run migrations on itself. Instead, migrations run once, from an operator's own machine, reaching the VPS database through an SSH tunnel:
+## VPS deployment: the edge, Postgres, and public hostnames
 
-```
+On the deployed VPS, every service sits behind a **reverse-proxy edge** (Caddy) and is reachable only on the loopback address (`127.0.0.1`) — the only port visible from outside is the edge's TLS port. The two MCP role surfaces each get their own public hostname. These are nested under a shared `poc.` parent on `stemolly.com`, specifically to avoid squatting the short subdomains that the real app will need later:
+
+| Environment | Operator hostname | Student hostname |
+|---|---|---|
+| Production PoC | `operator.poc.stemolly.com` | `student.poc.stemolly.com` |
+| Rehearsal droplet | `operator.rehearsal.poc.stemolly.com` | `student.rehearsal.poc.stemolly.com` |
+
+Using bare `operator.stemolly.com` / `student.stemolly.com` was explicitly rejected — those names are reserved for the real Student and Console apps that ship later, and reusing them for the PoC would force a rename right when real links might already be in use. The rehearsal droplet gets its own one-level-deeper names so a rehearsal's DNS records, TLS certificates, and Caddy state can never contaminate the production PoC hostnames.
+
+### Migrations over SSH tunnel
+
+Postgres carves out one narrow, deliberate exception to the loopback rule: it also publishes on loopback (`127.0.0.1:5432`), even though nothing ever proxies it. The reason is a tooling limitation — the migration tool needs a `tsx` loader that installs process-global hooks, which are unsafe to run inside a long-lived container. So no container in the stack can run migrations on itself. Instead, migrations run once, from an operator's own machine, reaching the VPS database through an SSH tunnel:
+
+```bash
+# on the operator's machine, open the tunnel:
 ssh -L 5432:127.0.0.1:5432 <vps-host>
-# then, from the operator's machine:
-DATABASE_URL=postgres://...@127.0.0.1:5432/...
+
+# then, in a separate terminal, run migrations:
+DATABASE_URL=postgres://...@127.0.0.1:5432/... pnpm migrate
 ```
 
 :::caution[A deliberate, narrow exception]
-SSH is the only process on the VPS host itself — not a container — able to reach that loopback port, so publishing Postgres this way only ever serves someone who already holds SSH access to the box, never an outside caller. A port scan of the VPS from the outside still shows nothing but the edge's public port; this loopback publish is treated as part of that same guarantee, not a break in it.
+SSH is the only process on the VPS host itself — not a container — that can reach that loopback port, so this setup only ever serves someone who already holds SSH access to the box, never an outside caller. A port scan of the VPS from outside still shows nothing but the edge's public port; the loopback-published `5432` is a deliberate, named exception to the "all services loopback-only" rule, not a break in it.
+:::
+
+### Operator-facing deployment guides
+
+Two guides live in `docs/deploy/`, alongside the existing `docs/design/` and `docs/prd/` directories:
+
+- **`01-verify-on-vps.md`** — the disposable **rehearsal droplet**: proves the deploy step-by-step before anything real is at stake, and runs one full backup → restore → verify cycle. Nothing on a rehearsal droplet is irreplaceable.
+- **`02-production-deploy.md`** — the **durable droplet** that serves the actual student. Written as a diff against the rehearsal guide (real DNS, real secrets, DigitalOcean snapshots as a second recovery layer alongside `pg_dump`, an installed crontab for scheduled backups, a recurring restore fire drill). It does not repeat the mechanics from the rehearsal guide.
+
+The split was deliberate: both steps look almost identical, but differ sharply in what is at stake. Collapsing them into one document risked burying that distinction.
+
+## Backup and restore verification
+
+A `pg_dump` file existing on disk proves the dump ran — not that it can be restored, and not that its contents are correct. The tooling the PoC ships treats those as separate questions, each requiring its own check.
+
+`server/scripts/backup.ts` writes the dump and handles dump-file retention (a pure `pruneDumps` function invoked by the crontab, not baked into any container). A cron entry on the VPS runs this on a schedule.
+
+`server/scripts/verify-restore.ts` is what actually proves a restore. It connects to both a source database and a freshly restored scratch database, and checks them on two axes:
+
+1. **`engine.evidence_events` row counts** — a mismatch means evidence was lost in the dump-restore cycle.
+2. **Replayed belief state** — it calls the real `getBeliefState()` for every student in either database and compares the output. This works because belief state is a deterministic replay over the evidence log: two databases with the same log produce exactly the same belief state.
+
+If anything diverges, the function returns a non-empty `divergences[]` that names exactly what — a row-count delta, or which student's belief output differs. It does not return a bare pass/fail. It also rejects outright if given the same connection string for both source and scratch, guarding the operator mistake of accidentally comparing a database to itself (which would trivially match and prove nothing).
+
+Neither script has an application caller. Both are operator-only tools — `backup.ts` via cron, `verify-restore.ts` via a manual invocation (`tsx -e ...`). That is the right shape for tooling whose caller is a human under pressure, not another module.
+
+:::tip[Why this level of rigor?]
+The evidence log is append-only by design — once written, it cannot be corrected. The student's belief history is exactly what the PoC exists to produce, and it is irreplaceable. A backup nobody has verified restored correctly is a hypothesis, not a guarantee.
 :::

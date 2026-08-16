@@ -1,6 +1,6 @@
 ---
 title: Backend & Persistence
-description: How Stemolly's backend persists data and runs async work — PostgreSQL as the single datastore, an in-process Postgres-backed job runner, node-pg-migrate conventions, the STEMOLLY_ config convention, and the operational hazards around tsx, connection-pool teardown, and local dev tooling.
+description: PostgreSQL as the sole datastore, in-process job runner design, migration conventions, configuration patterns, and local dev tooling notes.
 ---
 
 Stemolly's backend keeps things deliberately simple: one PostgreSQL database holds every kind of data the app needs, and even asynchronous work runs through that same database instead of a separate queue. On top of that sits a small set of conventions — how migrations are written, how config is read, how the local dev stack is wired up — plus a few hard-won lessons about things that go wrong when a process runs for a long time. This page walks through all of it, from the top-level "why one database" decision down to the gotchas you'll actually hit running the stack on your machine.

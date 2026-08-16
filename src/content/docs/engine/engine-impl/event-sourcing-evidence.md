@@ -1,6 +1,6 @@
 ---
 title: Event Log and the Evidence Schema
-description: Why student observations are append-only, what one evidence event contains, and the chain of fixes that hardened its uniqueness key and catalog references over time.
+description: Why student observations are append-only, what one evidence event contains, the chain of fixes that hardened its uniqueness key and catalog references, and how an operator audits beliefs back to their source.
 ---
 
 Every belief the engine holds about a student starts as one thing: a permanent, append-only record of an observation. Nothing about a student's misconceptions, fragility, or reasoning patterns is ever written directly — it is always computed, on demand, from the log of what was observed. This page covers how that log is shaped, and the sequence of real bugs that hardened it into something safe to build on.
@@ -85,4 +85,18 @@ flowchart LR
 
 :::caution
 One catalog-reference gap remains open. Nothing currently *requires* an observation type that needs a reference to actually carry one — an observation can still be stored with a missing reference and simply never match anything in the fold, silently and permanently, because the write-time resolution only checks a reference that is present, not whether one should have been.
+:::
+
+## Auditing beliefs back to their evidence
+
+When an operator wants to verify that a recorded belief is backed by real interaction, the engine provides a middle step: one read that returns a student's evidence rows narrowed by the same filter value the belief read already used. Because the belief read and the evidence read share the same filter type, the value already in hand from finding the belief can narrow the trail directly, with no translation.
+
+This costs no schema change. The evidence-query port already returns every row with its scaffold stamp, checkpoint id, session id, and payload. Filtering and outbound slug mapping happen in the orchestration layer, with no new port, table, or migration.
+
+The audit is deliberately kept off the student surface. A session has no business reviewing its own scaffolding history, and raw payload values invite a model to reason about how it was previously coached.
+
+The third step of the audit — reading what was actually said — has no mechanism. Transcripts live inside Claude sessions and never enter the engine, so `evidence_events.session_id` carries a **human-authored convention naming a retrievable conversation**, rather than a system-generated identifier. The engine neither generates nor validates it.
+
+:::caution
+This is a known shortfall. The load-bearing half of the groundedness check — confirming that recorded observations match real conversation — is unenforceable from within the engine. The `session_id` value is entered by a human and can never be revised once real evidence exists on that row, because the table is append-only. The application layer closes this gap by persisting transcripts as real artifacts, but the proof-of-concept cannot. Two further limits are accepted deliberately: no review verdicts are stored, so a spot-check's number is not reproducible from data alone; and the read cannot distinguish a belief backed by one weak observation from one backed by ten.
 :::

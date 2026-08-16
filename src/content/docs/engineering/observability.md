@@ -5,6 +5,7 @@ description: Schema-checked Pino logging, explicit RequestContext tracing, singl
 
 Stemolly's approach to observability and resilience rests on two pillars that reinforce each other. The first is **structured, schema-enforced logging** that makes every request traceable — from its first HTTP byte to the last LLM token — using a fixed field set carried by an explicit context object. The second is a layered **fault-tolerance strategy** that distinguishes between what must never be lost (the evidence log) and what can safely degrade, and enforces that distinction in code rather than convention.
 
+
 ---
 
 ## Structured Logging: The Field Contract

@@ -1,6 +1,6 @@
 ---
 title: Module Structure
-description: How each backend module is internally shaped — the hexagonal core/adapters split, the leaf-adapter rule, barrel-only index.ts, dependency-cruiser enforcement, composition-root wiring, and ESLint flat-config gotchas.
+description: How every backend module is laid out internally — the two-ring hexagonal shape, contract naming, barrel rules, enforcement tools, and where tests go.
 ---
 
 Every backend module in this codebase follows the same internal layout: a **core ring** containing all business logic, a surrounding **adapter ring** of concrete implementations, and a single public entry point. The shape comes from hexagonal architecture (also called ports-and-adapters), but the specific names, directory paths, and enforcement mechanisms are all project decisions — not generic hexagonal conventions. This page explains each layer, why it looks the way it does, and the rules that keep it intact.

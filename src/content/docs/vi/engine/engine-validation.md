@@ -1,95 +1,73 @@
 ---
-title: Kiểm định engine
-description: Mô hình kiểm định hai tầng, các chỉ số groundedness precision và predictive validity, cơ chế tự động hóa LLM-as-judge, và kỷ luật cần có để giữ các chỉ số này đáng tin cậy.
+title: Xác minh engine
+description: Cách engine mental-model chứng minh rằng nó thực sự hoạt động — hai tầng xác minh, groundedness precision và predictive validity, cùng cơ chế tự động hóa bằng LLM-as-judge với hiệu chuẩn, pin phiên bản và chạy offline.
 ---
 
-Engine mental-model đưa ra một khẳng định rất mạnh: nó ghi lại *cách học sinh thực sự suy nghĩ*, chứ không chỉ họ đã học qua những chủ đề nào. Chứng minh được điều đó khó hơn tưởng tượng. Trang này giải thích bài toán hai tầng, hai chỉ số được chọn để xử lý nó, những cách các chỉ số đó có thể thất bại, và kỷ luật cần thiết để giữ cho chúng đáng tin cậy.
+Giá trị của engine dựa trên một tuyên bố rất cụ thể: nó ghi lại *cách* học sinh suy nghĩ, chứ không chỉ *việc* các em đã hoàn thành gì. Muốn chứng minh được điều đó thì không thể chỉ cho thấy phần hạ tầng chạy ổn. Vì thế, việc validation (xác minh) được tách thành hai tầng, và gần như toàn bộ bằng chứng có sức thuyết phục đều nằm ở tầng cao hơn.
 
----
+## Hai tầng: hạ tầng hoạt động hay mô hình phản ánh sự thật
 
-## Hai tầng đúng/sai
+**Tầng 0 — Hạ tầng chạy đúng.** Belief model (mô hình niềm tin) có được lưu trong một phiên học, nạp lại ở phiên sau, và thật sự được truyền cho AI làm ngữ cảnh hay không? Đây là phép kiểm tra nhị phân có/không. Nó cần thiết, nhưng không chứng minh được gì về giả định cốt lõi — ngay cả một bộ theo dõi hoàn thành chủ đề rất đơn giản cũng có thể vượt qua.
 
-Việc kiểm định tách bạch thành hai câu hỏi.
-
-**Tầng 0 — hệ thống nền có chạy đúng không?** Trong một phiên học, engine có lưu mô hình niềm tin của nó không, sang phiên tiếp theo có nạp lại được không, và có thực sự truyền nó cho AI làm ngữ cảnh không? Đây là phép kiểm tra nhị phân có/không. Nó là điều kiện cần, nhưng hầu như chưa chứng minh được gì: ngay cả một bộ theo dõi topic-completion đơn giản cũng có thể vượt qua Tầng 0.
-
-**Tầng 1 — mô hình có phản ánh đúng sự thật không?** Những gì engine ghi lại có thực sự khớp với cách học sinh suy nghĩ không? Đây mới là nơi chứa toàn bộ bằng chứng thuyết phục. Mọi nỗ lực kiểm định nghiêm túc đều phải dựa trên các tín hiệu của Tầng 1; Tầng 0 chỉ nên được dùng như cổng điều kiện tiên quyết.
+**Tầng 1 — Mô hình là đúng.** Những belief (niềm tin/nhận định) mà engine ghi lại có thật sự khớp với cách học sinh suy nghĩ không? Đây mới là nơi chứa toàn bộ bằng chứng thuyết phục. Tầng 0 chỉ là cổng kiểm tra; niềm tin vào engine phải dựa trên các tín hiệu của Tầng 1.
 
 ```
-Level 0 (plumbing)   ──── gate ────▶  Level 1 (model is true)
-     ✔ save / reload                   ✔ groundedness precision
-     ✔ context supplied                ✔ predictive validity
+Level 0  ──►  plumbing gate  ──►  passes?
+                                      │  yes
+                                      ▼
+Level 1  ──►  groundedness precision + predictive validity
 ```
 
----
-
-## Hai chỉ số của Tầng 1
-
-Hai tín hiệu đã được chọn để chứng minh engine ở Tầng 1.
+## Hai tín hiệu của Tầng 1
 
 ### Groundedness Precision
 
-Lấy mẫu các hiểu lầm mà engine đã ghi nhận. Đọc lại transcript (bản chép hội thoại) thực tế của từng trường hợp. Đo xem: **tỷ lệ nào trong số đó là đúng thật sự?**
+*Trong số các ngộ nhận mà engine đã ghi lại, có bao nhiêu phần thực sự đúng?*
 
-Chỉ số groundedness precision (độ chính xác của mức độ bám sát dữ liệu) này rẻ để đo — khoảng 10 học sinh là đã dùng được — và cũng là nền tảng. Nếu groundedness precision thấp, thì những gì khác engine làm đều không còn ý nghĩa. Đây là thứ cần được đo đầu tiên.
+Lấy mẫu một tập belief đã được ghi nhận, đọc transcript (bản ghi hội thoại) thật, rồi đếm xem bao nhiêu belief thực sự được lời nói của học sinh nâng đỡ. Cách này rẻ — làm được với khoảng 10 học sinh — và là nền tảng ban đầu. Nếu precision kém, thì chưa đáng để theo đuổi các chỉ số còn lại.
+
+**Cẩn thận với bẫy precision.** Một engine gần như không ghi lại gì có thể đạt precision rất cao, vì mỗi belief hiếm hoi và dè dặt đều dễ đúng. Precision luôn phải được báo cáo cùng một thước đo coverage (độ phủ) hoặc volume (khối lượng) — chẳng hạn số belief được ghi lại trên mỗi phiên, hoặc tỷ lệ phiên làm lộ ra ít nhất một belief. Chỉ khi đặt precision cạnh coverage thì con số mới trung thực; còn precision đứng một mình sẽ thưởng cho một engine quá thận trọng.
 
 ### Predictive Validity
 
-Trước khi học sinh thử giải một bài mới, engine phát ra một dự đoán: học sinh này có làm được không, và nếu không thì sẽ vấp ở đâu, vì sao? Sau khi học sinh làm xong, so sánh dự đoán đó với điều thực sự xảy ra.
+*Trước khi học sinh thử giải một bài toán mới, engine dự đoán liệu các em có thất bại hay không, và sẽ vấp ở đâu. Dự đoán đó đúng bao nhiêu lần?*
 
-Predictive validity (tính hiệu lực dự báo) là phép kiểm định phản bác được mạnh nhất hiện có. Nó khớp trực tiếp với tuyên bố cốt lõi: đồ thị niềm tin của engine dự đoán được *học sinh sẽ gãy ở đâu*, chứ không chỉ họ đã đi qua đâu.
+Đây là phép kiểm định có thể bác bỏ mạnh nhất đối với engine. Nó bám đúng vào tuyên bố trung tâm: các mẫu hình suy luận sẽ dự đoán được nơi học sinh bị gãy. Một học sinh trông như đã “xong” nếu chỉ nhìn theo completion metric, nhưng lại bị engine gắn cờ vì một ngộ nhận ẩn, rồi sau đó thật sự thất bại đúng ở chỗ đó — đó cũng chính là **demo case** mà một bộ theo dõi hoàn thành không thể tái hiện.
 
-Một tín hiệu thứ ba — tìm ra một học sinh trông có vẻ đã "xong" theo completion metric (chỉ số hoàn thành), nhưng engine lại phát hiện đúng một hidden misconception (hiểu lầm ẩn) — chính là **demo case** (ca minh họa). Không thể dựng ra trường hợp này; phải tìm nó trong dữ liệu thật. Nhưng khi nó xuất hiện, đó là mảnh bằng chứng đơn lẻ thuyết phục nhất, vì completion tracker (bộ theo dõi hoàn thành) không thể nhìn thấy nó.
+## Biến predictive validity thành quy trình vận hành được
 
----
+### Checkpoint và tập anchor
 
-## Các dạng thất bại: Gaming và Leakage
-
-Cả hai chỉ số đều có một điểm yếu mang tính cấu trúc. Nếu không có thêm kỷ luật vận hành, thì không chỉ số nào an toàn để báo cáo.
-
-### Gaming Groundedness Precision
-
-Groundedness precision có thể bị đẩy lên tối đa bởi một engine gần như không ghi lại gì cả. Mỗi niềm tin hiếm gặp, dè dặt đều rất dễ ghi đúng, nên precision tăng cao — dù trên thực tế engine hầu như vô dụng.
-
-**Cách khắc phục:** luôn báo cáo precision đi kèm với một thước đo coverage (độ bao phủ) — ví dụ, số niềm tin được ghi lại mỗi phiên, hoặc tỷ lệ phiên học làm lộ ra ít nhất một niềm tin. Precision và coverage đi cùng nhau mới trung thực. Chỉ báo cáo precision thôi sẽ vô tình thưởng cho một engine quá thận trọng.
-
-```
-High precision + low coverage  ──▶  caution bias, not quality
-High precision + healthy coverage ──▶  genuine accuracy
-```
-
-### Leakage trong Predictive Validity
-
-Leakage nghĩa là tạo dự đoán *sau khi* kết quả đã lộ ra. Khi đó chỉ số trở nên vô nghĩa — engine chỉ đang dán nhãn lại lịch sử, chứ không dự đoán tương lai.
-
-**Cách khắc phục:** mọi dự đoán đều phải được ghi vào một **immutable, timestamped log** (nhật ký bất biến có đóng dấu thời gian) trước khi học sinh thử giải bài mới. Bước chấm kết quả phải diễn ra nghiêm ngặt ở phía sau, như một bước riêng biệt. Điều này cũng có nghĩa là mô hình dữ liệu của đồ thị niềm tin cần có prediction log (nhật ký dự đoán) chuyên biệt, chứ không thể chỉ dựa vào belief store (kho niềm tin) của trạng thái hiện tại.
-
----
-
-## Vận hành hóa Predictive Validity: các Novel-Problem Checkpoint
-
-Một chỉ số cần có điểm kích hoạt cụ thể. Với predictive validity, điểm kích hoạt đó là một **novel-problem checkpoint** (điểm chốt tại bài toán mới) — một thời điểm trong đối thoại Socratic khi engine dừng lại, chốt dự đoán của mình, rồi chỉ sau đó mới để học sinh thử giải bài.
+Dự đoán được kích hoạt tại một **novel-problem checkpoint**: thời điểm trong đối thoại kiểu Socratic mà tutor sắp đưa ra một bài toán thật sự mới. Engine khóa dự đoán *trước* khi học sinh nhìn thấy bài toán, rồi mới chấm kết quả sau đó.
 
 Có hai loại checkpoint:
 
-| Kind | Description | Role |
+| Loại | Nội dung | Vai trò |
 |---|---|---|
-| **Authored seed transfer problems** | Identical problems used across all students | **Anchor set** — makes scores comparable student-to-student |
-| **AI-chosen novel moments** | Any genuinely new problem the tutor poses | Adds volume and coverage across the whole graph |
+| **Authored seed transfer problems** | Các bài toán cố định, giống hệt nhau với mọi học sinh | Tập anchor — giúp chỉ số so sánh được giữa học sinh này với học sinh khác |
+| **AI-chosen checkpoints** | Những thời điểm mới do tutor tự sinh ra ngay trong lúc dạy | Mở rộng khối lượng và độ phủ trên toàn bộ belief graph |
 
-Dùng cả hai là một lựa chọn có chủ đích. Nếu chỉ giới hạn checkpoint vào authored seeds, chỉ số sẽ sạch và dễ so sánh hơn, nhưng độ bao phủ lại bị khóa chặt bởi công sức biên soạn bài. AI-chosen checkpoints mở rộng tín hiệu lên đáng kể — cái giá phải trả là cần có một bộ phát hiện đáng tin cậy cho thời điểm "sắp đặt ra một thứ thực sự mới".
+Nếu chỉ dùng authored seeds thì chỉ số sẽ sạch và dễ so sánh, nhưng coverage sẽ bị khóa theo công sức biên soạn. AI-chosen checkpoints bổ sung độ phủ rộng; cái giá phải trả là cần một bộ phát hiện đủ tin cậy để biết khi nào tutor “sắp đưa ra một điều gì đó thật sự mới”.
 
-**Prediction granularity — one prediction, one attempt.** Mỗi dự đoán được gắn với đúng một lần thử giải bài mới và một kết quả duy nhất của lần đó. Điều này giữ nguyên quan hệ 1:1 rõ ràng trước/sau mà chỉ số này phụ thuộc vào. Để tránh làm phình số liệu, với mỗi học sinh chỉ tính **lần thử đầu tiên** của từng bài toán riêng biệt. Những lần làm lại cùng một seed sẽ không làm tăng mẫu số.
+### Độ hạt của dự đoán
 
-Mỗi dự đoán mang theo một `basis` — hoặc là trạng thái mong manh của một nút trong đồ thị niềm tin, hoặc là một reasoning pattern (mẫu hình lập luận). Dự đoán theo reasoning pattern là một khẳng định thường trực: nó nhận một lần chấm điểm cho mỗi checkpoint phù hợp, vì thế một niềm tin rộng băng qua nhiều khái niệm vẫn tạo ra được nhiều phép kiểm định cụ thể, có thể bị phản bác.
+Mỗi dự đoán chỉ gắn với đúng một lần thử novel problem và đúng một kết quả của lần thử đó — một sự kiện dự đoán, một lần chấm điểm. Tỷ lệ 1:1 này rất quan trọng: một dự đoán kéo dài cả phiên học có thể khớp với từ 0 đến nhiều kết quả, nên không thể chấm điểm một cách sạch sẽ.
 
----
+Mỗi sự kiện dự đoán đều ghi lại nó dựa trên cái gì — hoặc là trạng thái mong manh của một node cụ thể trong belief graph, hoặc là một reasoning pattern (mẫu hình suy luận). Một dự đoán dựa trên reasoning pattern là một *standing claim* (khẳng định thường trực), và nó nhận một lần chấm điểm cho mỗi checkpoint phù hợp; vì vậy một tuyên bố rộng, băng qua nhiều khái niệm, vẫn tạo ra được nhiều phép thử cụ thể và có thể bác bỏ.
 
-## Tự động hóa các chỉ số: LLM-as-Judge
+Để giữ cho chỉ số trung thực (cùng một tinh thần với precision-vs-coverage): chỉ chấm một dự đoán cho mỗi học sinh trên mỗi bài toán phân biệt, **lần thử đầu tiên thôi**. Những lần thử lặp lại trên cùng một seed không được phép làm phình mẫu số.
 
-Việc chấm điểm cả hai chỉ số hoàn toàn bằng tay ở quy mô lớn là không khả thi. Giải pháp là dùng **LLM-as-judge** (LLM đóng vai trò giám khảo): một language model (mô hình ngôn ngữ) đọc transcript và tự động chấm đầu ra của engine.
+### Quy tắc chống rò rỉ thông tin
 
-Phù hợp với thiết kế LLM-agnostic (không phụ thuộc một LLM cụ thể) của Stemolly (xem [phần triển khai engine](./engine-impl.md)), judge có thể là bất kỳ mô hình phù hợp nào được chọn theo chi phí và độ khó — không có nhà cung cấp cố định. Với predictive validity, phần việc của LLM chỉ giới hạn ở chấm kết quả đầu ra (học sinh có thực sự hiểu hay chỉ đoán mò?). Phần cốt lõi của chỉ số — so sánh trước/sau với một dự đoán đã được chốt trước — là khách quan và không cần đến một phán đoán cảm tính.
+Nếu dự đoán được tạo ra *sau khi* kết quả đã lộ diện, thì chỉ số đó không còn ý nghĩa.
+
+:::caution[Rò rỉ thông tin sẽ làm chỉ số mất giá trị]
+Mọi dự đoán đều phải được ghi vào một **immutable, timestamped prediction log** (nhật ký dự đoán bất biến, có đóng dấu thời gian) trước khi học sinh thử làm bài. Việc chấm kết quả chỉ diễn ra nghiêm ngặt ở bước sau, tách biệt. Điều này có nghĩa là mô hình dữ liệu của belief graph cần một prediction log riêng — không thể chỉ dựa vào belief ở trạng thái hiện tại.
+:::
+
+## Tự động hóa bằng LLM-as-Judge
+
+Cả hai chỉ số đều có thể được chấm tự động bằng một LLM đóng vai trò judge (bộ chấm), đọc transcript rồi đánh giá đầu ra của engine. Với predictive validity, vai trò của LLM bị giới hạn ở việc chấm kết quả (học sinh thật sự hiểu hay chỉ đoán mò?) — phần lõi của chỉ số vẫn là so sánh khách quan giữa trước và sau, chứ không phải một phán đoán cảm tính. Phù hợp với nguyên tắc Stemolly độc lập với từng LLM cụ thể, judge có thể là bất kỳ LLM nào được chọn theo chi phí và độ khó, chứ không khóa vào một nhà cung cấp cố định.
 
 ```mermaid
 flowchart LR
@@ -100,36 +78,33 @@ flowchart LR
     E --> G["Predictive validity score"]
 ```
 
----
+### Hiệu chuẩn với một tập gold do con người gán nhãn
 
-## Kỷ luật vận hành: Calibration, Pinning và Offline Batch
+LLM judge có thể sai. Tệ hơn, nếu cùng một loại mô hình vừa tạo ra belief vừa tự chấm belief đó, chúng có thể cùng chia sẻ những điểm mù giống nhau và vô tình củng cố sai sót cho nhau. Cách khắc phục là dựng một **human-labeled gold set** (tập chuẩn do con người gán nhãn) cỡ khoảng 30–50 belief. Sau đó đo xem LLM judge đồng ý với nhãn do con người gán bao nhiêu lần. Nhờ vậy, “hãy tin điểm số AI đưa ra” được chuyển thành một tỷ lệ đồng thuận có thể đo đếm. Nếu không có hiệu chuẩn, bài toán niềm tin chỉ bị dời chỗ chứ không được giải quyết.
 
-Việc tự động hóa bằng LLM judge cũng kéo theo những rủi ro riêng. Có ba nguyên tắc kỷ luật giúp giữ các chỉ số này đáng tin cậy.
+### Pin phiên bản để tái lập kết quả
 
-### Calibration dựa trên một Human Gold Set
+LLM judge là hệ không tất định. Một điểm số tạo ra hôm nay có thể không còn so sánh được với điểm số của tháng sau nếu model hoặc prompt đã đổi. Để giữ cho các chỉ số còn so sánh được theo thời gian:
 
-LLM judge có thể sai. Tệ hơn nữa, nếu cùng một kiểu mô hình vừa tạo ra niềm tin vừa tạo ra điểm số, chúng có thể chia sẻ cùng điểm mù và củng cố sai lầm của nhau.
-
-Cách khắc phục là dùng **human-labeled gold set** (bộ mẫu chuẩn do con người gán nhãn): khoảng 30–50 niềm tin được một người đánh giá gán nhãn. Sau đó đo xem LLM judge đồng ý với các nhãn của con người với tần suất bao nhiêu. Cách này biến yêu cầu "hãy tin vào điểm số của AI" thành một tỷ lệ đồng thuận có thể đo được. Không có calibration, bài toán niềm tin không hề được giải quyết — nó chỉ bị dời sang chỗ khác.
-
-### Pinning cho Model, Prompt và Temperature
-
-LLM là hệ không tất định. Cùng một prompt nếu gửi sang phiên bản mô hình khác — hoặc chỉ cần temperature khác — cũng có thể tạo ra điểm số khác. Một con số được tạo ra hôm nay có thể không còn so sánh được với con số tạo ra tháng sau.
-
-Để giữ các chỉ số có thể so sánh theo thời gian:
-- Cố định **phiên bản model** và **phiên bản prompt** của judge.
+- Pin **phiên bản model** và **phiên bản prompt** của judge.
 - Dùng **temperature thấp**.
-- Ghi lại những phiên bản nào đã tạo ra từng lần chạy chỉ số.
+- Ghi lại mỗi lần chạy chỉ số đã dùng những phiên bản nào.
 
-Khi nâng cấp mô hình judge, hãy giả định đường cơ sở sẽ dịch chuyển. Cần calibration lại với human gold set trước khi đem số cũ và số mới ra so sánh.
+Khi nâng cấp model của judge, hãy chờ đợi việc baseline sẽ dịch chuyển, và cần hiệu chuẩn lại với human gold set trước khi đem so sánh số cũ với số mới.
 
-### Chạy Offline, không chạy Inline
+### Chạy offline — phán quyết của con người mới là chỉ số chính thức
 
-Judge chạy dưới dạng **offline batch jobs** (tác vụ hàng loạt ngoại tuyến), không bao giờ nằm trên luồng dạy học trực tiếp. Nó lấy mẫu các hiểu lầm đã được ghi nhận đưa vào review queue (hàng đợi rà soát), tiền sàng lọc bằng LLM để ưu tiên và chú giải, rồi chấm các checkpoint của predictive validity dựa trên prediction log đã được chốt trước.
+:::caution[Không chấm ngay trên luồng chạy trực tiếp]
+Judge **không** chạy trong luồng dạy học trực tiếp. Nếu thêm một lời gọi tới model mạnh ở mọi checkpoint, độ trễ và chi phí đều tăng, đồng thời chỉ số sẽ bị buộc chặt vào luồng production. Toàn bộ việc chấm đều chạy offline.
+:::
 
-Ở quy mô MVP, **human verdicts là metric of record** (kết luận của con người là thước đo chính thức). Groundedness precision chỉ tính những kết quả đã được con người rà soát, vì chính tuyên bố đang được kiểm định cũng là điều mà một LLM judge rất dễ chia sẻ cùng điểm mù. Giá trị của judge nằm ở throughput (thông lượng: đưa những ca đáng chú ý nhất lên trước) và vai trò **regression harness** (bộ khung kiểm tra hồi quy): chấm lại một mẫu bằng chứng cố định sau mỗi lần đổi prompt rồi so sánh chênh lệch điểm để bắt regression (suy giảm chất lượng) trước khi nó chạm tới môi trường production.
+Module judge chạy dưới dạng các batch job offline:
 
-Inline judging — kiểm định đầu ra của engine ngay lúc ghi — đã từng được cân nhắc rồi bị bác bỏ. Cách đó sẽ cộng thêm chi phí và độ trễ của một mô hình mạnh vào mọi checkpoint, đồng thời gắn chặt chỉ số với luồng chạy production theo cách khiến cả hai phía đều khó thay đổi một cách độc lập.
+1. **Sampling** — chọn ra các ngộ nhận đã được ghi nhận và đưa chúng vào hàng chờ review của Console.
+2. **Pre-screening** — một tầng LLM khác với tầng Expert đã tạo belief sẽ gắn chú thích và ưu tiên xem mục nào cần con người review trước.
+3. **Scoring** — chấm các checkpoint của predictive validity dựa trên những dự đoán đã được cam kết trước.
+
+Ở quy mô MVP, **chỉ số chính thức là phán quyết của con người**. Groundedness precision chỉ tính các verdict do con người đưa ra, vì tuyên bố đang được kiểm tra chính là thứ mà một LLM judge rất dễ chia sẻ cùng điểm mù. Giá trị của judge nằm ở throughput (giúp đẩy những ca đáng xem nhất lên trước) và ở vai trò **regression harness**: chấm lại một mẫu bằng chứng cố định sau mỗi lần đổi prompt, rồi so sánh sai khác để phát hiện hồi quy sớm.
 
 ```mermaid
 flowchart TD
@@ -138,13 +113,7 @@ flowchart TD
     BeliefLog -->|"batch, offline"| Judge["LLM Judge<br/>(prioritize + annotate)"]
     Judge --> Queue["Console review queue"]
     Queue --> Human["Human reviewer"]
-    Human --> Metric["Groundedness precision<br/>(human verdicts = metric of record)"]
+    Human --> Metric["Groundedness precision<br/>(human verdicts = record)"]
     PredLog -->|"batch, offline"| Judge2["LLM Judge<br/>(outcome grading)"]
     Judge2 --> PredMetric["Predictive validity score"]
 ```
-
----
-
-## Tóm tắt
-
-Việc kiểm định engine dựa trên hai chỉ số của Tầng 1 — groundedness precision và predictive validity — và mỗi chỉ số đều có một kiểu thất bại riêng cần được chủ động phòng ngừa. Groundedness precision cần đi kèm một chỉ số coverage để chống bị "game". Predictive validity cần một prediction log bất biến để chống leakage. LLM-as-judge giúp tự động hóa việc chấm điểm, nhưng muốn đáng tin thì phải được calibration, pinning và giữ ở chế độ offline. Ở quy mô MVP, kết luận của con người vẫn là ground truth; judge là công cụ tăng tốc và chốt chặn hồi quy, không phải người phân xử tối cao.

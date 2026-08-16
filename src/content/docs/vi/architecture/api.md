@@ -1,99 +1,61 @@
 ---
-title: API và cơ chế truyền nhận
-description: Cách Stemolly thiết kế API — route POST phẳng cho turn, cơ chế transport request/response thuần, validation ajv nghiêm ngặt và hợp đồng error envelope.
+title: API và transport
+description: Cách server phơi ra endpoint lượt tutor — một route POST phẳng, mô hình request/response đơn giản, xác thực nghiêm ngặt bằng cách tắt ajv coercion, và mọi lỗi đều được gom qua một bộ xử lý envelope duy nhất.
 ---
 
-Phần backend của Stemolly cung cấp một HTTP API nhỏ được xây dựng trên **Fastify**. Mọi lần tương tác của học sinh đều đi qua một route (đường dẫn xử lý) duy nhất. Phản hồi luôn là các JSON bundle (gói JSON) hoàn chỉnh — không dùng streaming (truyền luồng). Một validation contract (hợp đồng kiểm tra hợp lệ) chặt chẽ bảo đảm rằng mọi request sai, dù bị framework hay ứng dụng từ chối, đều trả về cùng một dạng lỗi.
+Bề mặt HTTP của server ở giai đoạn MVP được cố ý giữ thật nhỏ: chỉ một endpoint điều khiển toàn bộ vòng lặp student–tutor. Mọi lựa chọn thiết kế — hình dạng route, mô hình transport (cơ chế truyền tải), quy tắc validation (xác thực) — đều đi từ một nguyên tắc duy nhất: một hợp đồng được xác thực bằng schema, không có bất ngờ âm thầm nào.
 
----
+## Một route phẳng, một hợp đồng đầy đủ
 
-## Route của Turn
-
-Một turn (lượt trao đổi) của học sinh được gửi như sau:
-
-```
-POST /api/student/turn
-```
+Đầu vào của student được gửi tới `POST /api/student/turn` với phần thân JSON:
 
 ```json
 {
   "schemaVersion": "1",
-  "sessionId": "srv-issued-id",
-  "message": "Can you explain this again?"
+  "sessionId": "<server-issued session id>",
+  "message": "What does osmosis mean?"
 }
 ```
 
-Toàn bộ request — định danh session và nội dung tin nhắn — đều nằm trong **body**, không nằm trên URL.
+Một thiết kế trước đó dùng `POST /api/student/session/:id/turn`, đặt session ID trong URL path. Cách này bị bỏ vì path parameter và request body là hai schema tách biệt — bạn không thể biểu đạt toàn bộ `TurnRequest` như một kiểu duy nhất trong gói shared contracts. Fastify được chọn chính là vì khả năng validation JSON Schema theo từng route; tách một request logic thành hai schema đi ngược lại lựa chọn đó.
 
-### Vì sao không dùng route lồng nhau?
+Một lượt cũng là một **command** (lệnh), không phải một sub-resource (tài nguyên con). Không tồn tại bộ sưu tập turn nào, và cũng không có turn riêng lẻ nào từng được truy cập bằng ID, nên việc lồng path theo kiểu REST không đem lại lợi ích cấu trúc nào. Route phẳng mới là hình dạng trung thực.
 
-Một thiết kế trước đó dùng `POST /api/student/session/:id/turn`, tức đặt session ID trên URL path. Phương án này bị bác bỏ vì một lý do rất cụ thể: khi đó session ID sẽ nằm trong một schema `params`, còn phần còn lại của request lại nằm trong một schema `body`, khiến không thể biểu diễn `TurnRequest` thành một kiểu duy nhất trong shared contracts package.
+`sessionId` trong phần thân phải tham chiếu đến một dòng session thật do server cấp ra. Phương án để client tự bịa ra một giá trị mà server rồi sẽ bỏ qua cũng đã bị bác bỏ: một định danh không ánh xạ tới gì cả còn tệ hơn không có định danh nào, nhất là khi schema đang bận kiểm tra hình dạng của nó.
 
-Quy tắc của dự án là mọi artifact đi qua service boundary (ranh giới dịch vụ) đều phải được kiểm tra như một contract duy nhất có schema validation. Tách một request logic thành hai schema sẽ phá vỡ quy tắc đó — và khi type coercion (ép kiểu tự động) đã bị tắt trên toàn ứng dụng (xem bên dưới), một bề mặt `params` lại càng thêm vụng về.
+## Request/response đơn giản — không streaming
 
-Một turn cũng là một **command**, không phải sub-resource (tài nguyên con). Không hề có tập hợp turn nào tồn tại, và cũng không có turn riêng lẻ nào từng được truy cập bằng ID, nên cách lồng path theo kiểu REST không đem lại lợi ích cấu trúc nào. Route phẳng mới là hình dạng trung thực nhất.
+Một lượt tutor đi theo chu trình HTTP request/response thông thường. Student gửi POST chứa tin nhắn của mình; server trả về **toàn bộ gói phản hồi** (danh sách plugin message) khi việc sinh nội dung hoàn tất; frontend hiển thị chỉ báo "typing…" trong lúc chờ.
 
-`sessionId` trong body phải phân giải được tới một bản ghi session thật do server cấp. Phương án để client tự bịa một giá trị rồi server âm thầm bỏ qua cũng đã bị bác bỏ: khi schema đang kiểm tra hình dạng dữ liệu, một định danh không trỏ tới đâu còn tệ hơn là không có định danh nào.
-
----
-
-## Transport: Request/Response với chỉ báo đang nhập
-
-Một turn của tutor dùng mô hình plain HTTP request/response (yêu cầu/phản hồi HTTP thuần). Học sinh gửi POST; server trả về trọn bộ phản hồi (một danh sách plugin messages) khi quá trình sinh hoàn tất; frontend hiển thị chỉ báo "đang nhập…" trong lúc chờ.
-
-Streaming theo từng token đã được cân nhắc rồi loại bỏ. Turn phía học sinh chạy trên model **Interface** rất nhanh, thường xong trong vài giây — chỉ báo đang nhập là đủ về mặt cảm nhận phản hồi. Model **Expert** chậm hơn chạy ngoài vòng lặp turn nên không bao giờ chặn học sinh.
-
-Trong MVP không có message nào từ server gửi sang học sinh mà không được yêu cầu trước:
-
-- Cập nhật checkpoint sẽ đi kèm phản hồi của turn *tiếp theo*.
-- Lời nhắc khi im lặng quá lâu là một client-side timer (bộ đếm thời gian phía client), không phải server push.
-
-Vì server không bao giờ cần chủ động đẩy một message mà học sinh chưa yêu cầu, SSE, WebSockets và mọi push channel đều không cần thiết. Bỏ chúng đi cũng đồng nghĩa loại bỏ kết nối sống lâu, logic reconnect, cấu hình proxy buffering, và cả câu hỏi nên dùng connection registry hay Redis.
-
-**Khi nào nên xem xét lại:** nếu một tính năng trong tương lai cần message server→student không cần yêu cầu trước (một lời nhắc trực tiếp, một plugin thời gian thực), thì chỉ lớp transport cần đổi — phần phản hồi vốn đã là một danh sách message, nên hình dạng dữ liệu vẫn giữ nguyên.
-
----
-
-## Validation: Một Envelope cho mọi lỗi
+Streaming theo từng token từng được cân nhắc rồi loại bỏ vì là một cam kết vượt quá nhu cầu. Lượt tương tác phía student chạy trên Interface model nhanh (vài giây), nên chỉ báo đang gõ là đủ để tạo cảm giác phản hồi. Expert model chậm hơn chạy ngoài vòng lặp của turn và không bao giờ chặn student.
 
 ```mermaid
 sequenceDiagram
-    participant C as Client
-    participant F as Fastify
-    participant H as setErrorHandler
-    participant R as Route Handler
+    participant Student as Student Browser
+    participant API as "POST /api/student/turn"
+    participant Interface as Interface Model
 
-    C->>F: POST /api/student/turn
-    alt body fails JSON-Schema
-        F->>H: FST_ERR_VALIDATION
-        H->>C: 400 ValidationError envelope
-    else body passes
-        F->>R: validated body
-        alt domain error
-            R->>H: typed AppError
-            H->>C: error envelope
-        else success
-            R->>C: 200 response bundle
-        end
-    end
+    Student->>API: POST turn request
+    Note over Student: shows "typing…" indicator
+    API->>Interface: generate response bundle
+    Interface-->>API: complete bundle
+    API-->>Student: full response (plugin messages)
+    Note over Student: renders response
 ```
 
-### Một error handler cho mọi lỗi
+Vì trong MVP server không bao giờ cần chủ động đẩy một tin nhắn mà student chưa yêu cầu (cập nhật checkpoint sẽ tới ở lượt tiếp theo; tính năng nhắc khi im lặng là bộ đếm giờ phía client), nên SSE, WebSocket và mọi kết nối duy trì lâu đều không cần thiết. Nhờ đó, logic kết nối lại, cấu hình proxy buffering, và câu hỏi nên quản lý registry kết nối hay Redis đều được loại khỏi phạm vi MVP.
 
-Fastify kiểm tra request body của từng route theo JSON Schema trước khi route handler chạy. Khi validation thất bại, Fastify phát sinh `FST_ERR_VALIDATION` — kiểu lỗi riêng của framework, nằm ngoài hệ thống typed error của ứng dụng.
+:::note[Điều kiện để xem xét lại]
+Nếu một tính năng tương lai cần một tin nhắn server → student không do yêu cầu khởi phát — như một lời nhắc trực tiếp hoặc một plugin thời gian thực — thì chỉ transport là cần thay đổi. Hình dạng phản hồi thì đã sẵn sàng rồi, vì nó vốn đã là một danh sách message.
+:::
 
-Dự án ánh xạ lỗi ở cấp framework này về cùng dạng envelope được dùng ở mọi nơi khác. Một `setErrorHandler` duy nhất trong `server/src/api/error-handler.ts` xử lý cả hai trường hợp:
+## Validation nghiêm ngặt: ajv coercion bị tắt
 
-- `FST_ERR_VALIDATION` từ Fastify → được tuần tự hóa thành một envelope `ValidationError`.
-- Bất kỳ `AppError` có kiểu nào do một domain module ném ra → được tuần tự hóa thành biến thể envelope tương ứng của chính nó.
+Fastify dùng **ajv** (trình xác thực JSON Schema) để kiểm tra mọi request body trước khi route handler chạy. Theo mặc định, ajv sẽ *coerce* (ép kiểu ngầm) các kiểu vô hướng: nếu một trường được khai báo là `{ type: 'string' }` nhưng client gửi số `123`, ajv sẽ âm thầm chuyển nó thành `"123"` rồi cho qua là hợp lệ. Route handler nhìn thấy một body sạch và trả về `200` — việc lệch kiểu trở nên vô hình.
 
-Client luôn nhận cùng một cấu trúc, bất kể lỗi phát sinh từ đâu.
+Điều này âm thầm phá hỏng hợp đồng error-envelope (bao lỗi). Một trường sai kiểu đáng ra phải trả về `400` có cấu trúc. Khi bật coercion, sẽ không có lỗi validation nào được phát ra, nên error handler không bao giờ được gọi.
 
-### Vì sao phải tắt coercion
-
-Ánh xạ này có một điều kiện tiên quyết ít lộ diện. Với cấu hình ajv **mặc định** của Fastify, các kiểu scalar sẽ bị coercion **trước khi** schema validation chạy. Nếu client gửi `{ "message": 123 }` còn schema khai báo `{ type: "string" }`, Fastify sẽ âm thầm đổi `123` thành `"123"` và validation vẫn qua. Route sẽ nhìn thấy một body hợp lệ và trả về `200`. `FST_ERR_VALIDATION` không bao giờ được phát sinh, nên error handler cũng không bao giờ được gọi — hợp đồng envelope bị phá vỡ mà không có dấu hiệu cảnh báo rõ ràng nào.
-
-Cách sửa là tắt coercion **một lần duy nhất** tại điểm khởi tạo `fastify()` trong `server/src/app.ts`:
+Cách sửa là một cấu hình duy nhất tại nơi khởi tạo Fastify trong `server/src/app.ts`:
 
 ```ts
 const app = fastify({
@@ -102,34 +64,44 @@ const app = fastify({
 });
 ```
 
-Khi coercion bị tắt, schema của mọi route sẽ kiểm tra kiểu *thực tế* của request. Một trường sai kiểu lúc này sẽ phát sinh `FST_ERR_VALIDATION`, và error handler sẽ bắt lỗi đó rồi bọc lại vào envelope.
+Khi coercion bị tắt, mọi route đều xác thực *đúng kiểu thực tế* mà client đã gửi. Cấu hình này nằm ở composition root (gốc lắp ghép) để áp dụng cho mọi route mà không cần từng route tự phòng thủ. Phương án còn lại — để coercion bật — đã bị bác bỏ: sự tiện lợi của coercion ở đây chẳng có giá trị gì (không route nào muốn nhận `"123"` từ `123`), trong khi kiểu lỗi của nó là âm thầm và sẽ tự động ảnh hưởng tới mọi route tương lai.
 
-Phương án còn lại — giữ coercion ở trạng thái bật rồi để từng route tự phòng thủ — đã bị bác bỏ. Sự tiện lợi của coercion không có giá trị gì ở đây (không route nào muốn nhận chuỗi `"123"` thay cho số `123`), trong khi kiểu hỏng này lại âm thầm và ảnh hưởng tới mọi route được thêm về sau. Tắt nó một lần tại composition site (điểm hợp thành) là nơi duy nhất giúp ràng buộc này có hiệu lực trên toàn cục.
+:::caution[Test instance]
+Một bài test tự dựng `fastify()` trần của riêng nó sẽ **không** kế thừa cấu hình này — Fastify sẽ dùng mặc định của framework. Mọi instance test dựng tay đều phải tự áp dụng lại `coerceTypes: false`, nếu không một assertion cho body sai định dạng có thể vẫn pass nhưng vì lý do sai.
+:::
 
-> **Test instance không kế thừa gì cả.** Một bài test tự dựng `fastify()` trần sẽ **không** kế thừa cấu hình này. Các test instance được tạo thủ công phải áp dụng lại `coerceTypes: false` một cách tường minh, nếu không một kiểm tra với body lỗi định dạng có thể vẫn "đúng", nhưng vì sai lý do.
+Lớp bảo vệ này được chứng minh bằng một test lệch kiểu chuyên biệt trong `server/test/error-handler.test.ts`, độc lập với mọi route của ứng dụng. Nó đã được kiểm chứng theo cách rất thực tế: tạm thời bỏ `coerceTypes: false` khỏi `app.ts` làm test thất bại với `expected 200 to be 400`; khôi phục cấu hình đó thì test xanh trở lại. Route tạm `echo-turn` có thể bị xóa ở một sprint sau mà không làm mất đi bằng chứng duy nhất của lớp bảo vệ này.
 
-### Chốt chặn coercion không phụ thuộc route
+## Lỗi validation và error envelope
 
-Ban đầu, bài test duy nhất cho quy tắc này bị gắn chặt với route tạm thời `echo-turn`. Nếu route đó bị xóa, bài test cũng biến mất theo — và chốt chặn coercion sẽ không còn bằng chứng nào bảo vệ nó.
+Validation schema của Fastify tạo ra mã lỗi riêng của nó — `FST_ERR_VALIDATION` — nằm ngoài hệ phân cấp typed-error (lỗi phân loại bằng kiểu) của ứng dụng. Nếu không xử lý tường minh, một request trượt validation schema của route (trước cả khi chạm tới mã domain) sẽ đi vòng qua error envelope tiêu chuẩn và trả về phản hồi thô, không có cấu trúc, của Fastify.
 
-Giờ đây chốt chặn đó đã được cố định độc lập: `server/test/error-handler.test.ts` có một trường hợp riêng cho lỗi lệch kiểu (một giá trị số cho trường `{ type: "string" }`) không phụ thuộc vào bất kỳ route ứng dụng nào. Bản sửa đã được kiểm chứng theo cách trực diện nhất — tạm thời gỡ `coerceTypes: false` khỏi `app.ts`, chạy lại bài test mới và thấy nó thất bại với `expected 200 to be 400`, rồi khôi phục `app.ts` và bài test lại vượt qua. Route `echo-turn` có thể bị xóa ở sprint sau mà không làm mất phạm vi bảo vệ của chốt chặn này.
+Một `setErrorHandler` duy nhất trong `server/src/api/error-handler.ts` sẽ chặn mọi lỗi và ánh xạ chúng về hình dạng envelope:
 
----
+```mermaid
+flowchart LR
+    A["Route schema check<br/>(ajv, coerceTypes:false)"]
+    B["Domain / app logic"]
+    C["setErrorHandler<br/>(error-handler.ts)"]
+    D["Error envelope response"]
 
-## Fastify Plugin Registration: Thời điểm rất quan trọng
+    A -->|"FST_ERR_VALIDATION"| C
+    B -->|"typed app error"| C
+    C --> D
+```
 
-Hệ thống plugin của Fastify là **lazy** (trì hoãn). Gọi `app.register(...)` không gắn route ngay lập tức — nó chỉ xếp plugin vào hàng chờ. Các route chỉ thực sự được đăng ký khi `app.ready()` được `await` trong lúc khởi động.
+Mọi lỗi HTTP mà client nhận được đều có cùng một cấu trúc, bất kể lỗi đó đến từ bước kiểm tra schema của chính framework hay từ logic ứng dụng sâu hơn trong stack. Hai mảnh này phối hợp với nhau: việc tắt coercion đảm bảo lệch kiểu thật sự phát sinh `FST_ERR_VALIDATION`, còn error handler đảm bảo lỗi đó xuất hiện dưới dạng envelope có cấu trúc thay vì đầu ra Fastify thô.
 
-Điều này rất quan trọng với mọi bài test hoặc fitness function cần soi bảng route. Chỉ có một khoảng thời gian rất hẹp để gắn collector:
+## Bao phủ test cho bảng route
+
+Vì bất kỳ route mới nào cũng có thể vô tình làm rộng bề mặt API, bảng route được kiểm soát bằng một kiểm tra allowlist trong CI. Fastify đăng ký plugin theo kiểu **lazy** (trì hoãn) — `app.register(...)` chỉ xếp plugin vào hàng đợi; các route bên trong nó chưa tồn tại cho tới khi `app.ready()` chạy. Điều này tạo ra một cửa sổ rất hẹp để introspect (thanh tra) route:
 
 ```
-app.register(routes)   ← queues the plugin
-app.addHook('onRoute', collect)   ← ✓ attach here
-await app.ready()   ← routes register, hook fires
+app.register(routes)          // queues the plugin
+app.addHook('onRoute', collect)  // ← attach here
+await app.ready()             // routes register; hook fires
 ```
 
-Nếu `onRoute` hook được gắn sau `app.ready()`, nó sẽ không bắt được gì và tập thu thập sẽ rỗng. Nếu `app.ready()` không bao giờ được gọi, các route vẫn chưa tồn tại — kết quả cũng rỗng.
+Nếu gắn `onRoute` sau `app.ready()`, hook sẽ không nhận được gì — tập kết quả rỗng. Nếu không bao giờ gọi `app.ready()`, các route vẫn chưa tồn tại — cũng rỗng. Một tập rỗng có thể pass theo kiểu vacuous khi kiểm tra chỉ đi tìm “không có route cấm nào xuất hiện”, trông thì xanh nhưng thực ra không quan sát được gì.
 
-Một tập rỗng có thể khiến phép kiểm tra hỏng mà không bị phát hiện: nếu phép kiểm tra chỉ tìm xem "không có route cấm nào được tìm thấy", thì một tập rỗng sẽ mặc nhiên vượt qua, trông như màu xanh nhưng thực ra chẳng quan sát được gì cả.
-
-`onRoute` hook là công cụ phù hợp để soi bảng route vì nó cung cấp một đối tượng có cấu trúc `{ method, url }` cho từng route ngay khi route đó được đăng ký. Nhờ vậy có thể so sánh chính xác một `Set` với allowlist (danh sách cho phép) đã được chốt sẵn. `printRoutes()` trả về một chuỗi cây đã được định dạng, mà hình dạng của nó không phải một contract ổn định — muốn dùng thì phải tự phân tích. Phép so sánh đẳng thức tập hợp sẽ phát hiện cả route thừa lẫn route bị thiếu nhưng mục tương ứng vẫn còn nằm trong allowlist.
+Hook `onRoute` cung cấp một cấu trúc `{ method, url }` cho từng route ngay lúc nó được đăng ký, từ đó cho phép so sánh `Set` chính xác với allowlist đã được ghim. `printRoutes()` từng được cân nhắc rồi bác bỏ — nó trả về một chuỗi cây đã định dạng, không phải một hợp đồng ổn định, và sẽ còn cần bị parse. Assertion so sánh tập hợp này sẽ nổ cả khi có thêm một route chưa khai báo lẫn khi một route bị xóa nhưng mục tương ứng vẫn còn sót lại trong allowlist.

@@ -1,13 +1,13 @@
 ---
 title: Kiến trúc cốt lõi
-description: "Stemolly được tổ chức như thế nào — monorepo, một deployable duy nhất, backend modular monolith, ngăn xếp TypeScript và mô hình quản trị bốn trụ cột — tất cả đều xoay quanh mục tiêu chính: luôn dễ thay đổi."
+description: "Stemolly được tổ chức như thế nào — một monorepo, một khối triển khai duy nhất, một backend modular monolith, một stack TypeScript, và một mô hình quản trị bốn trụ cột — tất cả đều được định hình bởi một mục tiêu chính: luôn dễ thay đổi."
 ---
 
-Stemolly được thiết kế để dễ thay đổi. Mục tiêu đó — gọi là *evolvability* (khả năng tiến hóa) — là yêu cầu phi chức năng quan trọng nhất, và nó chi phối mọi lựa chọn về cấu trúc được mô tả trên trang này. Muốn hiểu vì sao kiến trúc lại có hình dạng như hiện nay thì phải bắt đầu từ đó.
+Stemolly được thiết kế để dễ thay đổi. Mục tiêu đó — gọi là *evolvability* (khả năng tiến hóa) — là yêu cầu phi chức năng quan trọng nhất, và nó chi phối mọi lựa chọn cấu trúc được mô tả trên trang này. Muốn hiểu vì sao kiến trúc trông như hiện nay, phải bắt đầu từ điểm đó.
 
-## Một Monorepo, Một Deployable
+## Một monorepo, một khối triển khai
 
-Dự án phục vụ hai nhóm người dùng: học viên và đội ngũ nội bộ (người dùng Console). Đây là hai ứng dụng web riêng, giao diện riêng, nhưng cùng chia sẻ một domain (miền nghiệp vụ): Console soạn các brief mà phiên học của học viên sẽ sử dụng, còn các phiên này lại ghi evidence để Console theo dõi. Chỉ khi dữ liệu cũng tách riêng thì việc chia thành hai backend độc lập mới hợp lý, nhưng thực tế không phải vậy.
+Dự án phục vụ hai nhóm người dùng: học sinh và đội ngũ nội bộ (người dùng Console). Đây là hai ứng dụng web riêng, có UI riêng, nhưng chúng dùng chung một domain — Console biên soạn các brief mà phiên học của học sinh sẽ sử dụng, còn các phiên học thì ghi evidence để Console quan sát lại sau đó. Tách chúng thành hai backend riêng chỉ hợp lý nếu dữ liệu cũng tách biệt, nhưng thực tế thì không.
 
 Vì thế, cấu trúc là:
 
@@ -19,17 +19,17 @@ monorepo
 └── server               ← one Fastify backend process
 ```
 
-Cả ba runtime artifact — nginx, server image và Postgres — được đóng gói cùng nhau thành **một deployable** (đơn vị triển khai) duy nhất. Phương án multi-repo đã bị loại vì gói `contracts` được cả hai frontend lẫn server import; giữ mọi thứ trong một repo giúp các thay đổi cắt ngang ở mức contract diễn ra theo kiểu nguyên tử và được kiểm tra kiểu trong cùng một pull request.
+Cả ba hiện vật chạy thực tế — nginx, server image và Postgres — được phát hành cùng nhau như **một khối triển khai duy nhất**. Phương án multi-repo đã bị loại vì gói `contracts` được cả hai frontend lẫn server cùng import; để mọi thứ trong một repo giúp các thay đổi contract xuyên suốt hệ thống có thể diễn ra một cách nguyên tử và được type-check trong cùng một pull request.
 
-Phương án hai backend (để *blast-radius isolation* — cô lập phạm vi ảnh hưởng sự cố) cũng từng được cân nhắc và vẫn được giữ như một *extraction seam* (điểm tách sau này). Nó chỉ thực sự đáng làm khi Console có thêm người dùng bên ngoài hoặc Student mở đăng ký tự phục vụ — nhưng ở quy mô hiện tại, việc tách ra chưa giúp giảm rủi ro nếu vẫn dùng chung thông tin truy cập cơ sở dữ liệu, trong khi chi phí làm chậm khả năng thích ứng thì sẽ xuất hiện ngay.
+Phương án hai backend (để cô lập blast radius) cũng từng được cân nhắc và vẫn được giữ như một extraction seam (điểm có thể tách ra sau này). Nó chỉ thực sự đáng giá khi Console có người dùng bên ngoài hoặc Student app mở đăng ký tự phục vụ — còn ở quy mô hiện tại, việc tách đôi đó sẽ không thật sự giảm rủi ro nếu vẫn chưa tách cả thông tin xác thực cơ sở dữ liệu, trong khi cái giá phải trả về độ linh hoạt sẽ đến ngay lập tức.
 
-## Backend: một Modular Monolith
+## Backend: một modular monolith
 
-Server là **một process** (tiến trình) duy nhất, bên trong chứa các module có ranh giới nghiêm ngặt. Không có kiểu chia thành microservices, không có giao tiếp mạng giữa các module. Các module gồm:
+Server là **một tiến trình duy nhất** chứa các module có ranh giới nghiêm ngặt. Không có chia tách microservices, không có mạng giữa các module. Các module là:
 
 `engine`, `tutor`, `pedagogy`, `content`, `identity`, `llm`, `judge`, `authoring-ai`, `metering`, `jobs`, `api`
 
-Ranh giới được cưỡng chế bằng **dependency lint** (`dependency-cruiser` + `eslint-boundaries`), chứ không phải bằng mạng. Module `engine` không import gì từ tầng trên; không module nào chọc sâu vào bên trong module khác. Kiểm tra lint này phải đủ sức chặn CI ngay từ sprint đầu tiên — nếu có thể lách qua, toàn bộ mô hình sẽ sụp đổ.
+Ranh giới được cưỡng chế bằng **dependency lint** (`dependency-cruiser` + `eslint-boundaries`), chứ không phải bằng mạng. Module `engine` không import gì từ các lớp ở trên; không module nào chui sâu vào bên trong module khác. Kiểm tra lint này phải chặn CI ngay từ sprint đầu tiên — nếu có thể lách qua, toàn bộ mô hình sẽ sụp đổ.
 
 ```mermaid
 graph TD
@@ -47,24 +47,24 @@ graph TD
     llm --> engine
 ```
 
-Vì sao không dùng microservices? Các khái niệm cốt lõi của domain — brief, evidence, report — tương tác xuyên qua hầu như mọi module. Bất kỳ cú xoay nào đi qua một ranh giới như vậy đều sẽ biến thành thay đổi nhiều repo, nhiều lần triển khai và phải quản lý version contract. Ở quy mô hiện tại, **phân tán hệ thống đi ngược mục tiêu evolvability quan trọng nhất.** Các seam vẫn được để lộ rõ có chủ đích, để đội ngũ có thể tách thành service sau này khi một ràng buộc đo được (lưu lượng, quy mô đội ngũ, nhu cầu cô lập) thật sự đáng để trả cái giá đó.
+Vì sao không dùng microservices? Các khái niệm cốt lõi của domain — brief, evidence, report — tương tác xuyên qua mọi module. Bất kỳ thay đổi hướng đi nào băng qua một seam cũng sẽ biến thành một thay đổi nhiều repo, nhiều lần triển khai, có version cho contract. Ở quy mô hiện tại, **phân tán đi ngược lại mục tiêu evolvability quan trọng nhất.** Các seam được cố ý làm cho dễ nhìn thấy để sau này đội ngũ có thể tách dịch vụ khi một ràng buộc đã được đo đếm rõ ràng (lưu lượng, quy mô đội ngũ, nhu cầu cô lập) thật sự biện minh cho chi phí đó.
 
-## Bề mặt API: Bốn Namespace
+## Bề mặt API: bốn namespace
 
-Backend duy nhất này lộ ra bốn namespace (không gian API):
+Backend duy nhất này phơi ra bốn namespace:
 
 | Namespace | Ai có thể gọi | Có chặn quyền không? |
 |---|---|---|
-| `/api/student/*` | Ứng dụng Student | ✅ giới hạn theo vai trò, mặc định từ chối |
-| `/api/console/*` | Ứng dụng Console | ✅ giới hạn theo vai trò, mặc định từ chối |
-| `/api/admin/*` | Quản trị viên nội bộ | ✅ giới hạn theo vai trò, mặc định từ chối |
-| `/api/auth/*` | Bất kỳ ai (trước khi vào phiên) | ❌ cố ý không chặn |
+| `/api/student/*` | Student app | ✅ theo vai trò, mặc định từ chối |
+| `/api/console/*` | Console app | ✅ theo vai trò, mặc định từ chối |
+| `/api/admin/*` | Quản trị viên nội bộ | ✅ theo vai trò, mặc định từ chối |
+| `/api/auth/*` | Bất kỳ ai (trước phiên) | ❌ cố ý không chặn |
 
-Namespace `/api/auth/*` không chặn vì các endpoint của nó — đăng nhập, chấp nhận lời mời — chạy trước khi bên gọi có vai trò. Tất cả namespace còn lại đều mặc định từ chối; yêu cầu sai vai trò sẽ bị chặn ngay ở mức prefix trước khi chạm tới bất kỳ handler (bộ xử lý) nào.
+Namespace `/api/auth/*` không bị chặn vì các endpoint của nó — đăng nhập, chấp nhận lời mời — chạy trước khi bên gọi có vai trò. Tất cả namespace còn lại đều mặc định từ chối; một request đi kèm sai vai trò sẽ bị chặn ngay ở cấp tiền tố trước khi tới bất kỳ handler nào.
 
-## Ngăn xếp: TypeScript Từ Đầu Đến Cuối
+## Stack: TypeScript từ đầu đến cuối
 
-Mọi tầng đều dùng TypeScript. Gói `contracts` dùng chung là phần mô liên kết của hệ thống: nó xuất bản các định nghĩa JSON Schema và các kiểu TypeScript được sinh ra, rồi được cả hai frontend và server import.
+Mọi lớp đều dùng TypeScript. Gói `contracts` dùng chung chính là mô liên kết của toàn hệ thống: nó công bố các định nghĩa JSON Schema và các kiểu TypeScript được sinh ra từ đó, rồi được cả hai frontend lẫn server import.
 
 ```mermaid
 graph LR
@@ -77,17 +77,17 @@ graph LR
     server_node --> contracts
 ```
 
-**Fastify** được chọn thay cho Express (một giả định trước đó) vì hai lý do rất cụ thể: khả năng kiểm tra JSON Schema theo từng route khớp chính xác với cách gói `contracts` vận hành, và các plugin đóng gói theo prefix ánh xạ trực tiếp sang bốn namespace API. Đây là một router tường minh, không có “phép thuật” kiểu meta-framework.
+**Fastify** được chọn thay cho Express (một giả định có từ trước) vì hai lý do rất cụ thể: cơ chế xác thực JSON Schema gốc theo từng route khớp chính xác với cách gói `contracts` hoạt động, và plugin đóng gói theo tiền tố của nó ánh xạ trực tiếp vào bốn namespace API. Nó là một router tường minh, không có thứ “ma thuật” nào của meta-framework.
 
-Các phương án đã bị loại:
+Các phương án thay thế đã bị loại:
 
-- **Next.js / Remix** — luồng điều khiển bị che khuất; không có lợi ích SSR cho hai ứng dụng đều nằm sau lớp xác thực.
-- **Python + FastAPI** — chia đôi ngôn ngữ ngay tại seam `contracts`, vốn là nơi thay đổi nhiều; ở đây việc dùng LLM là điều phối qua API, không phải suy luận ML cục bộ.
-- **Heavy ORMs** — bị loại để các DB trigger cho bảng append-only và các recursive CTE vẫn dễ đọc dưới dạng SQL thuần.
+- **Next.js / Remix** — luồng điều khiển bị che khuất; không có lợi ích SSR cho hai ứng dụng đều bị chặn sau lớp xác thực.
+- **Python + FastAPI** — chia đôi ngôn ngữ ngay trên seam `contracts` có tốc độ thay đổi cao; việc dùng LLM ở đây là điều phối API, không phải suy luận ML cục bộ.
+- **Heavy ORMs** — bị loại để các DB trigger append-only và recursive CTE vẫn có thể đọc hiểu như SQL thuần.
 
-## Quản trị: Bốn Trụ Cột
+## Quản trị: bốn trụ cột
 
-Kiến trúc chỉ được giữ đúng hướng khi có bốn lớp tài liệu hóa và cưỡng chế hỗ trợ lẫn nhau. Mô hình quản trị này tồn tại chính để bảo đảm mục tiêu evolvability vẫn đúng trong quá trình triển khai, chứ không chỉ ở giai đoạn thiết kế.
+Kiến trúc được giữ cho trung thực nhờ bốn lớp tài liệu hóa và cưỡng chế. Mô hình quản trị này tồn tại chính là để bảo đảm mục tiêu evolvability vẫn đúng trong quá trình triển khai, chứ không chỉ đúng ở thời điểm thiết kế.
 
 ```mermaid
 flowchart TD
@@ -103,44 +103,58 @@ flowchart TD
     A --> R
 ```
 
-- **Design Principles** — phần triết lý; cái “vì sao” sinh ra mọi quyết định.
-- **ADRs** — ghi lại một lựa chọn cụ thể, cùng những gì đã bị loại và vì sao. Mỗi khi thêm module, datastore, dịch vụ ngoài hay ranh giới process thì đều cần có ADR.
-- **Design Rules (`R-*`)** — các ràng buộc cứng có thể kiểm tra được, mỗi rule đều viện dẫn ít nhất một principle. Mỗi rule phải ánh xạ tới ít nhất một fitness function.
-- **Architecture Structure** — hồ sơ sống về module, hành vi runtime, mô hình dữ liệu và cách triển khai.
+- **Design Principles** — tầng triết lý; phần “vì sao” sinh ra mọi quyết định.
+- **ADRs** — ghi lại một lựa chọn cụ thể, kèm những gì đã bị loại và lý do loại bỏ. Thêm một module, datastore, dịch vụ ngoài hoặc ranh giới tiến trình đều phải có ADR.
+- **Design Rules (`R-*`)** — các ràng buộc cứng, có thể kiểm tra được, mỗi ràng buộc đều viện dẫn một principle. Mỗi rule phải ánh xạ tới ít nhất một fitness function.
+- **Architecture Structure** — hồ sơ sống về module, hành vi runtime, mô hình dữ liệu và triển khai.
 
 **Fitness functions** là lớp cưỡng chế, được sắp theo độ mạnh:
 
-1. **Machine in CI** (mạnh nhất) — dependency-lint cho ranh giới module, danh sách chặn bằng grep để ngăn việc lẫn lộn vendor/domain.
-2. **Runtime-enforced** — DB trigger cho bảng append-only, các khẳng định ở runtime trong cổng LLM.
-3. **Human process** (phương án cuối) — rà soát thủ công ở những chỗ chưa thể tự động hóa.
+1. **Máy trong CI** (mạnh nhất) — dependency-lint cho ranh giới module, danh sách cấm grep cho việc rò rỉ vendor/domain.
+2. **Cưỡng chế lúc runtime** — DB trigger cho các bảng append-only, runtime assertion trong LLM gateway.
+3. **Quy trình con người** (dự phòng) — review thủ công ở những nơi việc tự động hóa chưa thực tế.
 
-Các *cross-cutting concerns* (mối quan tâm xuyên cắt) — auth, lỗi, logging, idempotency, config, resilience — được quyết định ngay từ pha kiến trúc (chốt seam và bất biến), rồi chỉ điền chi tiết ở pha thiết kế. Nếu dời chúng muộn hơn nữa, từng module sẽ tự chọn theo cách riêng, tạo ra kiểu bất nhất rất tốn công gỡ lại.
+Các mối quan tâm cắt ngang — auth, lỗi, logging, idempotency, cấu hình, resilience — được quyết định ở giai đoạn kiến trúc (chốt seam và các bất biến), rồi chỉ đến giai đoạn thiết kế mới điền vào chi tiết cụ thể. Nếu trì hoãn muộn hơn nữa, từng module riêng lẻ sẽ tự chọn theo cách khác nhau, tạo ra kiểu bất nhất mà sau này rất đắt để gỡ.
 
-### Điều Gì Thuộc ADR — Và Điều Gì Không
+### Điều gì thuộc về ADR — và điều gì không
 
-Trong dự án này, phần thân của một ADR là **bất biến**. Muốn thay đổi quyết định thì phải viết ADR mới để thay thế ADR cũ, không bao giờ sửa lại bản gốc. Chính tính bất biến đó tạo ra một quy tắc rất rõ về những gì được phép xuất hiện trong phần *Decision* của ADR.
+Trong dự án này, phần thân của một ADR là **bất biến**. Muốn thay đổi một quyết định thì phải viết ADR mới để thay thế ADR cũ, tuyệt đối không sửa ADR gốc. Tính bất biến này tạo ra một quy tắc rất rõ về việc điều gì được phép xuất hiện trong phần *Decision* của ADR.
 
 :::caution[Tên file và đường dẫn không thuộc về ADR]
-Nếu một tên file xuất hiện trong phần Decision của ADR, chỉ cần đổi tên file đó là một hồ sơ đã được chấp nhận sẽ trở thành sai theo nghĩa đen. Cách khắc phục duy nhất khi đó là viết ADR thay thế — một thủ tục tốn kém cho điều có khi chỉ là đổi tên thường lệ.
+Nếu tên file xuất hiện trong phần Decision của ADR, thì chỉ cần đổi tên file đó là một hồ sơ đã được chấp nhận trở thành sai theo nghĩa đen. Cách khắc phục duy nhất khi đó là supersession — một nghi thức tốn kém cho một việc đôi khi chỉ là đổi tên thường lệ.
 :::
 
-Cách phân chia để tránh vấn đề này là:
+Cách phân chia để tránh điều đó:
 
 - **ADR gọi tên vai trò và bất biến.** Ví dụ: “driving contract không bao giờ import driven contracts.”
 - **Design rules (`R-*`) gọi tên file** đang giữ các vai trò đó. Ví dụ: R-28 liệt kê `core/driving.ts`, `core/driven.ts`.
 
-Rule được chỉnh sửa trong công việc thường ngày — danh sách file trong một rule có thể thay đổi mà không cần đụng tới ADR phía sau nó. Bố cục có thể tiến hóa theo nhịp của rule; hồ sơ quyết định thì vẫn trung thực.
+Rule có thể được sửa trong công việc thường ngày — danh sách file của một rule có thể thay đổi mà không cần đụng đến ADR mà nó chống lưng. Bố cục có thể tiến hóa với tốc độ của rules; hồ sơ quyết định thì vẫn giữ được tính chân thực.
 
-ADR-023 từng cho thấy thất bại của cách làm ngược lại khi ghi một cấu trúc thư mục cụ thể vào phần Decision. Chỉ cần đổi tên về sau là đã mâu thuẫn với một hồ sơ đã được chấp nhận, và buộc phải viết ADR thay thế. ADR-029 được viết theo nguyên tắc ở trên: năm vai trò, không nêu tên file, còn R-28 và R-30 mới là nơi mang các đường dẫn.
+ADR-023 đã minh họa thất bại này khi ghi thẳng một layout thư mục cụ thể vào phần Decision. Bất kỳ lần đổi tên nào về sau cũng mâu thuẫn với một hồ sơ đã được chấp nhận, buộc phải supersede. ADR-029 thì được viết theo nguyên tắc ở trên: năm vai trò, không tên file, còn R-28 và R-30 mới là nơi giữ các đường dẫn.
 
-### Phạm Vi ADR: Ranh Giới, Không Phải Cách Vận Chuyển
+### Phạm vi ADR: ranh giới, không phải phương tiện truyền tải
 
-ADR có tính ràng buộc với phần việc còn tồn tại lâu hơn sprint đã sinh ra nó. Vì vậy, dòng `Scope` phải gọi tên một **ranh giới bền vững**, chứ không phải một hiện vật tạm thời rồi sẽ bị thay thế.
+ADR có tính ràng buộc đối với phần việc còn sống lâu hơn sprint đã sinh ra nó. Vì thế, dòng `Scope` của ADR phải gọi tên một **ranh giới bền vững**, chứ không phải một hiện vật tạm thời rồi sẽ bị thay thế.
 
-Bề mặt MCP của PoC là ví dụ cho một hiện vật tạm thời như vậy: hiện tại nó là lớp mang ranh giới engine hướng ra phía model, nhưng trong ứng dụng hoàn chỉnh nó sẽ được thay bằng lời gọi nội bộ `tutor` → `engine`. Thứ bền vững là engine và schema của nó. Nếu ADR được giới hạn theo các file MCP, thì tới khi PoC bị gỡ bỏ, ADR đó cũng âm thầm mất hiệu lực.
+Bề mặt MCP của PoC là một ví dụ về hiện vật tạm: hiện giờ nó là thứ mang ranh giới engine hướng về phía model, nhưng ứng dụng hoàn chỉnh sau này sẽ thay nó bằng lời gọi nội bộ trong tiến trình `tutor` → `engine`. Phần bền vững là engine và schema của nó. Nếu viết một ADR có phạm vi gắn với các file MCP, thì ADR đó sẽ âm thầm mất hiệu lực ngay khi PoC bị loại bỏ.
 
-Cách viết phạm vi đúng là:
+Cách viết scope đúng là:
 
-> *"Ranh giới hướng về phía model của module engine, bất kể đang được mang bằng transport nào: bề mặt công cụ MCP trong PoC hôm nay, lời gọi checkpoint-job nội bộ sau này."*
+> *"Ranh giới hướng về phía model của engine module, bất kể hiện đang được chuyên chở bằng phương tiện nào: hôm nay là bề mặt công cụ MCP của PoC, sau này là lời gọi checkpoint-job trong cùng tiến trình."*
 
-Những kết luận rút ra từ một hiện vật tạm thời nên nằm trong phần `Evidence` — khi đó chúng được đọc như quan sát về thể hiện hiện tại, chứ không phải giới hạn vĩnh viễn của quyết định. Quy tắc kinh nghiệm là: **nếu một định danh có thể bị khai tử theo lịch, nó không thể xuất hiện trong tài liệu sống lâu hơn cái lịch đó.** Ranh giới và năng lực có thể sống sót qua một lần viết lại; đường dẫn file bên trong một lớp vỏ dùng rồi bỏ thì không.
+Những phát hiện rút ra từ một hiện vật tạm thời phải nằm trong phần `Evidence` — khi đó chúng được đọc như quan sát về hiện thân hiện tại, chứ không phải giới hạn vĩnh viễn của cái mà quyết định đang cai quản. Quy tắc ngón tay cái là: **nếu một định danh có thể bị cho nghỉ hưu theo lịch, thì nó không thể xuất hiện trong một tài liệu sống lâu hơn các lịch đó.** Ranh giới và năng lực có thể sống sót qua một lần viết lại; còn đường dẫn file chui vào một lớp vỏ dùng rồi bỏ thì không.
+
+### Khi nào supersede, khi nào sửa ngay tại chỗ
+
+Tính bất biến cũng có ranh giới của nó, và hiểu được ranh giới đó giúp tránh hai sai lầm ngược chiều nhau: sửa một hồ sơ đáng lẽ phải bị supersede, hoặc supersede một hồ sơ đáng lẽ chỉ cần sửa thẳng.
+
+**Câu chữ quá rộng trong một ADR đã được chấp nhận** — khi một ADR đã được chấp nhận cấm nhiều hơn mức mà chính lập luận của nó thực sự hỗ trợ, cách xử lý là supersession ngay cả khi sửa trực tiếp có vẻ rẻ hơn xét về số lượng citation. Số citation không phải yếu tố quyết định, vì hai lý do. Thứ nhất, một ADR đã được chấp nhận khác có thể gọi ADR đầu tiên là `Precedent:` — sửa phần thân của ADR cũ đồng nghĩa dịch chuyển nền đất bên dưới một hồ sơ vốn cũng đang có tính ràng buộc. Thứ hai, lập luận “đó chỉ là lỗi soạn thảo” sẽ vĩnh viễn sẵn sàng được dùng để phản bác bất kỳ hồ sơ nào mà sau này ai đó không đồng ý, kể cả một agent chạy không giám sát; lớp bảo vệ duy nhất của toàn bộ tập hồ sơ là phần thân không được dịch chuyển. Mà bản ghi superseding mới cũng là hiện vật tốt hơn: nó phát biểu lại quy tắc ở đúng độ hạt vốn phải có từ đầu, mang nguyên văn các mệnh đề còn sống sang, và để hồ sơ gốc nằm lại trên đĩa như lịch sử — nơi câu chữ quá rộng kia giải thích vì sao khả năng bị cấm đó chưa từng được xây.
+
+**Các khẳng định đã được “verified” nhưng sai trong một bản nháp chưa commit** — một bản nháp cùng phiên làm việc mà chưa được commit hay bị cái gì khác trích dẫn thì vẫn chỉ là bản nháp, chưa phải “án lệ”. Supersede nó sẽ khiến khẳng định sai bị bảo tồn vĩnh viễn trong tập hồ sơ, và điều đó còn tệ hơn một lần sửa sạch sẽ đối với người đọc về sau. Những rào chắn để việc này không trở thành kẽ hở là: việc sửa phải được công khai chứ không âm thầm, quyết định từng dựa trên sự kiện sai đó phải được suy ra lại chứ không vá chắp, và phương án từng bị loại sai vì sự kiện đó phải được ghi vào phần `Rejected options` như đúng thứ đã được soạn trước khi file thực sự được đọc.
+
+:::note[Bài học từ trường hợp trước]
+Nhãn `verified` chỉ đáng tin tới mức mà việc xác minh thực sự chạm tới. Một khẳng định về những file nào hợp thành một surface phải được kiểm tra đối chiếu với chính file đang ghép surface đó — chứ không phải với những file có tên nghe như thể chúng làm việc đó.
+:::
+
+Hai quy tắc này cùng nhau vạch ra một ranh giới rõ ràng: **commitment và citation chính là ngưỡng**. Trước ngưỡng đó, hãy sửa hồ sơ một cách sạch sẽ. Sau ngưỡng đó, hãy supersede.

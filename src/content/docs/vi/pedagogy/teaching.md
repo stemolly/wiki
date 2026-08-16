@@ -1,26 +1,18 @@
 ---
 title: Giảng dạy & Phiên học
-description: Cách Stemolly tổ chức việc dạy học — các pedagogy có thể cắm ghép, lesson brief (đề cương bài học) như định hướng do tác giả biên soạn, chính sách probing (thăm dò) giúp lộ ra điểm yếu, và thang scaffolding (hỗ trợ từng nấc) dành cho học sinh bị mắc kẹt.
+description: Cách Stemolly tổ chức bài học, áp dụng pedagogy có thể hoán đổi theo từng phiên, thực hiện Socratic probing, cung cấp scaffolding theo từng mức, và hỗ trợ biên soạn có AI trong Console.
 ---
 
-Stemolly không truyền nội dung một chiều cho học sinh — hệ thống dẫn dắt để các em tự xây dựng sự hiểu biết. Gia sư AI trò chuyện trực tiếp, đặt câu hỏi và thích ứng theo thời gian thực. Tuy nhiên, cách dạy không áp dụng đồng loạt cho mọi trường hợp: phương pháp giảng dạy (gọi là *pedagogy* (phương pháp sư phạm)) thay đổi theo môn học và được xác định lại ở đầu mỗi phiên. Trang này giải thích cơ chế đó hoạt động ra sao — lesson (bài học) là gì, probing (thăm dò) vận hành thế nào trong các môn theo hướng Socratic, học sinh bị bí sẽ được hỗ trợ ra sao, và chương trình học được xây dựng như thế nào.
+Stemolly tách biệt **ý đồ giảng dạy** khỏi **cách triển khai trực tiếp**. Một tác giả là con người sẽ viết một teaching brief (bản chỉ dẫn giảng dạy) — gồm mục tiêu, các bước, và tài liệu đã được thẩm định — còn AI tutor agent (tác tử gia sư AI) sẽ dẫn dắt cuộc hội thoại trực tiếp dựa trên bản chỉ dẫn đó. Pedagogy (phương pháp sư phạm) mà tác tử áp dụng phụ thuộc vào từng miền môn học và có thể được ghi đè ở cấp bài học. Nhờ vậy, hệ thống vẫn linh hoạt mà không cần thay đổi bất kỳ mã lõi nào của engine.
 
----
+## Hai Pedagogy, Một Hệ thống Có thể Hoán đổi
 
-## Hai pedagogy, một hệ thống có thể cắm ghép
+Stemolly hiện có hai cách tiếp cận trong giảng dạy.
 
-Stemolly hiện đi kèm hai phương pháp giảng dạy.
+- **Socratic** — dùng cho Math, Physics, và Chemistry. Gia sư đặt câu hỏi để dẫn học sinh tự hình thành ý tưởng. Nó không bao giờ nói thẳng đáp án.
+- **Correct / Reinforce** — dùng cho Language. Gia sư chẩn đoán lỗi, sửa lỗi một cách tường minh, rồi củng cố lại mẫu đúng.
 
-- **Socratic** — dùng cho Toán, Vật lý và Hóa học. Gia sư đặt câu hỏi để dẫn học sinh tự hình thành ý tưởng. Hệ thống không đơn thuần nói luôn đáp án.
-- **Correct / Reinforce** — dùng cho Ngôn ngữ. Gia sư chẩn đoán lỗi, sửa trực tiếp và củng cố mẫu đúng.
-
-Đây không phải là thứ bị mã hóa cứng theo từng môn. Pedagogy là một *declarative bundle* (gói khai báo) — một gói gồm chỉ dẫn prompt, guardrails (rào chắn), checkpoint policy (chính sách checkpoint) và scaffolding ladder (thang hỗ trợ từng bước). Một resolver (bộ phân giải) nhỏ sẽ chọn đúng gói ở đầu mỗi phiên theo cơ chế phân tầng ba mức:
-
-```
-lesson override  →  mode default  →  domain default
-```
-
-Nếu tác giả của lesson đã chỉ định một pedagogy, lựa chọn đó sẽ được ưu tiên. Nếu không, hệ thống dùng mode default, rồi mới đến domain default. Trong MVP hiện tại chỉ mới thiết lập các giá trị mặc định theo domain (Math → Socratic, Language → Correct/Reinforce), nhưng cơ chế này hoạt động tới cấp độ từng lesson — tác giả có thể ghi đè pedagogy cho bất kỳ lesson riêng lẻ nào mà không cần đụng vào phần còn lại.
+Đây không phải là các hành vi hardcoded (mã hóa cứng). Mỗi pedagogy là một **declarative bundle (gói khai báo)** — một gói gồm chỉ dẫn prompt, guardrails (hàng rào kiểm soát; ví dụ quy tắc Socratic là không bao giờ tiết lộ insight đích), checkpoint policy (chính sách điểm kiểm), và scaffolding ladder (thang hỗ trợ từng mức). Một bộ phân giải nhỏ sẽ chọn đúng bundle khi bắt đầu mỗi phiên dựa trên cơ chế phân tầng ba cấp:
 
 ```mermaid
 flowchart LR
@@ -29,122 +21,114 @@ flowchart LR
     C --> D["Active pedagogy bundle"]
 ```
 
-**Vì sao dùng declarative bundle thay vì code hook?** Phương án còn lại là cho phép các chiến lược pedagogy tồn tại dưới dạng callback mã tùy ý, được chèn vào vòng lặp lượt hội thoại của gia sư. Cách đó bị loại bỏ vì chiến lược viết bằng mã khó đọc, khó so sánh hơn, và quan trọng hơn là các giả định của Socratic sẽ âm thầm rò rỉ vào những luồng cốt lõi của engine. Declarative bundle có thể được kiểm tra trực tiếp. Muốn thêm một pedagogy mới chỉ cần viết một bundle mới và đăng ký nó; không cần sửa dù chỉ một dòng trong engine hay lõi tutor.
+Nếu tác giả bài học đã chỉ định một pedagogy thì lựa chọn đó sẽ được ưu tiên. Nếu không, hệ thống dùng mặc định của mode, rồi mới đến mặc định của domain. Trong MVP hiện tại, mới chỉ có các mặc định theo domain được điền sẵn, nhưng cơ chế này hoạt động ở độ hạt bài học — tác giả có thể ghi đè pedagogy cho bất kỳ bài học riêng lẻ nào mà không phải đụng vào phần khác.
 
----
+**Vì sao dùng declarative bundle thay vì code hook?** Cách strategy-as-code (chiến lược viết bằng mã) đã bị loại bỏ vì các callback trong mã khó đọc, khó so sánh hơn, và quan trọng hơn là các giả định kiểu Socratic sẽ âm thầm rò rỉ vào các luồng lõi của engine. Declarative bundle thì có thể xem xét trực tiếp được. Muốn thêm một pedagogy mới chỉ cần viết một bundle mới và thêm một mục vào registry (sổ đăng ký); không cần sửa dù chỉ một dòng trong engine, tutor core hay API.
 
-## Ba chế độ học
+## Ba Chế độ học
 
-Mỗi phiên đều chạy trong một trong ba chế độ. Active pedagogy bundle áp dụng cho cả ba.
+Mỗi phiên học đều chạy trong một trong ba mode. Active pedagogy bundle sẽ áp dụng trong cả ba.
 
-| Mode | Điều gì diễn ra |
+| Mode | Diễn ra điều gì |
 |---|---|
-| **Lesson** | Học sinh học theo nội dung có cấu trúc. Gia sư đồng hành và áp dụng pedagogy của domain để làm lộ ra và xử lý các ngộ nhận ngay trong thời gian thực. |
-| **Assessment / Diagnostic** | Gia sư đưa ra bài toán để lập bản đồ mức độ hiểu của học sinh. Mục tiêu không phải là cho điểm — mà là phác họa mô hình tư duy của học sinh. |
-| **Assignment Help** | Học sinh tải bài tập lên. Gia sư hướng dẫn các em xử lý bài bằng pedagogy của domain — và trong các môn Socratic thì tuyệt đối không đưa đáp án trực tiếp. |
+| **Lesson** | Học sinh đi qua nội dung có cấu trúc. Gia sư đồng hành và áp dụng pedagogy của domain để làm lộ ra rồi xử lý các misconception theo thời gian thực. |
+| **Assessment / Diagnostic** | Gia sư đưa ra bài toán để lập bản đồ mức độ hiểu của học sinh. Mục tiêu không phải là cho điểm — mà là tạo ra một bức tranh về mô hình nhận thức của học sinh. |
+| **Assignment Help** | Học sinh tải bài tập lên. Gia sư sẽ hướng dẫn các em đi qua bài đó bằng pedagogy của domain — và không bao giờ cho đáp án trực tiếp ở các môn dùng Socratic. |
 
-Cả ba chế độ đều đưa dữ liệu trở lại mental model (mô hình tư duy) bền vững của học sinh (xem [../engine/mental-model.md](../engine/mental-model.md)).
+Cả ba mode đều đưa evidence (bằng chứng quan sát) trở lại mô hình nhận thức bền vững của học sinh.
 
----
+## Một Bài học Thực sự là gì
 
-## Lesson thực sự là gì
+Trong Stemolly, một bài học không phải là một mẩu nội dung cố định được đưa thẳng cho học sinh xem. Nó là một **authored teaching brief (bản chỉ dẫn giảng dạy do tác giả biên soạn)** được chuyển cho tutor agent, rồi từ đó tác tử này dẫn dắt một cuộc hội thoại trực tiếp.
 
-Trong Stemolly, lesson không phải là một mẩu nội dung cố định được hiển thị cho học sinh. Đó là một **teaching brief** (bản chỉ dẫn giảng dạy do tác giả biên soạn) được chuyển cho tutor agent (tác tử gia sư), rồi từ đó agent sẽ dẫn dắt một cuộc trò chuyện trực tiếp.
-
-Tác giả phụ trách:
-- Một **mục tiêu** — khái niệm hoặc kỹ năng mà sau phiên học, học sinh cần thực sự nắm được.
-- Một **tập bước có thứ tự** — ví dụ: nêu bài toán mở đầu, dẫn học sinh hiểu đề, giúp các em tự xây dựng lý thuyết, mở rộng, luyện tập, giao bài.
-- Một **ý đồ cho từng bước** — ở mỗi giai đoạn, gia sư nên làm gì.
+Tác giả chịu trách nhiệm về:
+- Một **goal (mục tiêu)** — khái niệm hoặc kỹ năng mà phiên học cần giúp học sinh thực sự nắm được.
+- Một **tập bước có thứ tự** — ví dụ: nêu bài toán mở đầu, dẫn học sinh hiểu bài toán, giúp các em tự xây dựng lý thuyết, mở rộng, luyện tập, giao bài.
+- Một **ý đồ cho từng bước** — ở mỗi giai đoạn, gia sư cần làm gì.
 - **Tài liệu đã được thẩm định** — bài đọc, ví dụ và probe seed mà gia sư buộc phải dựa vào, chứ không được tự bịa ra.
 
-Tutor agent phụ trách chính cuộc đối thoại. Agent đọc brief, nắm active pedagogy rồi ứng biến — đặt câu hỏi theo ngữ cảnh trong một lesson Socratic, hoặc chẩn đoán và sửa lỗi trong một lesson Ngôn ngữ — đồng thời vẫn bám sát ý đồ và cấu trúc bước mà tác giả đã nêu. Các tài liệu đã thẩm định đóng vai trò mỏ neo nền tảng: gia sư không thể bịa nội dung, điều này đặc biệt quan trọng trong một sản phẩm giáo dục, nơi chỉ một công thức hay một dữ kiện sai cũng có thể gây hại thực sự.
+Tutor agent chịu trách nhiệm về cuộc hội thoại trực tiếp. Nó đọc brief, nhận pedagogy đang được kích hoạt, rồi ứng biến — đặt câu hỏi kiểu Socratic cho Math/Physics/Chemistry, hoặc chạy vòng lặp chẩn đoán/sửa/củng cố/kiểm tra lại cho Language — trong khi vẫn bám chặt các bước và ý đồ mà tác giả đã đặt ra. Các tài liệu đã thẩm định đóng vai trò như một neo bám để giữ nội dung đúng thực tế: gia sư không được bịa thông tin, điều này đặc biệt quan trọng trong một sản phẩm giáo dục, nơi một công thức hay dữ kiện sai có thể gây hại thật sự.
 
-Thiết kế này cho phép cùng một brief nhưng có thể tạo ra cuộc trò chuyện khác nhau cho từng học sinh. Cấu trúc thì lặp lại được; hội thoại thì không.
+Cùng một brief có thể tạo ra các cuộc hội thoại khác nhau cho từng học sinh. Cấu trúc thì lặp lại được; đối thoại thì không. Toàn bộ schema (lược đồ) của lesson brief vẫn đang được đặc tả; đây là hướng thiết kế đã được chốt.
 
----
+## Probing: Cách Gia sư Socratic Làm lộ ra Sự Mong manh
 
-## Probing: cách gia sư Socratic làm lộ ra điểm yếu
+*Phần này áp dụng cho pedagogy Socratic — Math, Physics, và Chemistry.*
 
-*Phần này áp dụng riêng cho pedagogy Socratic (Toán, Vật lý, Hóa học).*
+### Probe Không phải là một Chế độ Riêng
 
-### Probe không phải là một chế độ riêng
+Trong dạy học kiểu Socratic, các câu hỏi **chính là** hoạt động giảng dạy. Một "probe" chỉ đơn giản là một dạng câu hỏi Socratic — gia sư không chuyển sang một chế độ kiểm tra đặc biệt nào cả. Thay vào đó, nó liên tục đan xen hai loại câu hỏi:
 
-Trong cách dạy Socratic, câu hỏi **chính là** việc dạy. Vì vậy, một "probe" đơn giản chỉ là một kiểu câu hỏi Socratic — gia sư không chuyển sang một chế độ kiểm tra đặc biệt nào cả. Thay vào đó, hệ thống tự nhiên đan xen hai loại câu hỏi trong mọi lesson:
+- **Constructive questions (câu hỏi kiến tạo)** — từng bước đỡ để học sinh tiến tới một ý tưởng. *"Tính chất phân phối cho ta biết gì về (a+b)²?"*
+- **Testing (elenctic) questions (câu hỏi kiểm thử/phản biện)** — gây áp lực lên một ý tưởng mà học sinh có vẻ đang tin là đúng. *"Vì sao cách đó đúng?", "Nếu đổi dấu này thì sao?", hoặc một bài chuyển dạng với bề mặt mới.*
 
-- **Constructive questions** — dựng giàn để dẫn học sinh tới một ý tưởng. *"Tính chất phân phối cho ta biết gì về (a+b)²?"*
-- **Testing (elenctic) questions** — thử độ bền của một ý mà học sinh có vẻ đang nắm giữ. *"Vì sao cách đó đúng?", "Nếu đổi dấu này thì sao?", hoặc một bài chuyển dạng trong một cách biểu hiện mới.*
+Độ mong manh được đọc ra từ cách học sinh xử lý các câu hỏi kiểm thử. Mỗi lượt phản hồi của học sinh trong đối thoại đều là một evidence event (sự kiện bằng chứng): misconception có thể lộ ra, được giải quyết, rồi lại cho thấy tính mong manh — tất cả đều diễn ra ngay trong chuỗi đặt câu hỏi thông thường, không cần chế độ quiz riêng.
 
-Mức độ mong manh được đọc ra từ cách học sinh xử lý các testing questions. Khi học sinh trả lời nhanh, máy móc các constructive questions, đó là tín hiệu để chuyển dần sang kiểm tra. Mỗi lượt trả lời của học sinh trong hội thoại đều là một evidence event: ngộ nhận lộ ra, được tháo gỡ và chứng minh là còn mong manh — tất cả diễn ra ngay trong dòng hỏi đáp bình thường, không cần một chế độ quiz riêng.
+### Chính sách Probing: Đan xen, Nghiêng về Kiểm thử, Áp một Mức Sàn
 
-### Chính sách probing: đan xen, nghiêng về kiểm tra, áp dụng ngưỡng sàn bắt buộc
+Gia sư không probe mọi khái niệm đến mức kiệt quệ (làm vậy sẽ làm giảm trải nghiệm), nhưng cũng không probe theo một lịch cố định (quá thô). Thay vào đó, nó:
 
-Gia sư không probe mọi khái niệm đến mức cạn kiệt (làm vậy sẽ phá hỏng trải nghiệm), nhưng cũng không probe theo một lịch cố định (quá thô). Thay vào đó, hệ thống:
+1. **Liên tục đan xen** các câu hỏi kiến tạo và câu hỏi kiểm thử trong suốt bài học.
+2. **Nghiêng về kiểm thử** khi câu trả lời đến quá nhanh hoặc nghe có vẻ máy móc — một tín hiệu của việc khớp mẫu.
+3. **Áp một mức sàn cứng**: một khái niệm không bao giờ được đánh dấu là *robust* (vững) cho tới khi học sinh tự mình vượt qua ít nhất một phép thử thực sự — một bài chuyển dạng hoặc một câu hỏi "vì sao".
 
-1. **Liên tục đan xen** constructive questions và testing questions.
-2. **Nghiêng về kiểm tra** khi câu trả lời đến quá nhanh hoặc nghe máy móc — dấu hiệu của việc khớp mẫu.
-3. **Áp dụng một ngưỡng sàn cứng**: một khái niệm không bao giờ được đánh dấu là *robust* nếu chưa vượt qua ít nhất một phép thử thực sự — một bài chuyển dạng hoặc một câu hỏi "vì sao".
+Mức sàn này là lớp bảo vệ then chốt. "Trông như đã xong" không bao giờ đồng nghĩa với "đã được xác nhận là vững" nếu chưa vượt qua một phép thử sức thật sự.
 
-Ngưỡng sàn này là lựa chọn thiết kế then chốt. Nó ngăn việc "học sinh đã trả lời hết các bước" bị hiểu thành "học sinh đã hiểu". Một khái niệm chưa từng bị thử sức thì chưa thể gọi là vững.
+### Điều gì Tạo ra các Probe?
 
-### Điều gì tạo ra các probe?
+Probe hiệu quả nhất là probe được may đo theo đúng điều học sinh vừa nói. Ví dụ: *"Em viết 4m² + 25 — vậy nó giống và khác gì so với điều ta đã tìm ra cho (a+b)²?"* Chỉ tutor, ngay trong lúc đối thoại đang diễn ra, mới có thể viết ra câu như vậy. Vì thế, probe chủ yếu là **AI-generated and contextual (được AI tạo ra và phụ thuộc ngữ cảnh)**.
 
-Probe hiệu quả nhất là probe được may đo theo đúng điều học sinh vừa nói. Ví dụ: *"Em viết 4m² + 25 — điều đó so với kết quả ta tìm được cho (a+b)² thì thế nào?"* Chỉ có tutor, ngay trong lúc đối thoại, mới có thể đặt ra câu hỏi đó. Vì thế, probe chủ yếu là **do AI tạo ra và có tính ngữ cảnh**.
+Tác giả cũng có thể cung cấp một số ít *seed transfer problems* cho mỗi concept node. Các seed này tạo ra sự nhất quán trong đo lường: khi hai học sinh cùng trả lời một seed problem, kết quả của các em có thể được so sánh trực tiếp. Seed problem nằm trong phần tài liệu đã thẩm định của lesson brief. Việc tạo sinh là chính; các seed do tác giả viết đóng vai trò hỗ trợ cho đo lường.
 
-Tác giả cũng có thể cung cấp một số ít *seed transfer problems* cho mỗi concept node. Những seed này giúp việc đo lường nhất quán hơn: khi hai học sinh cùng trả lời một seed problem, kết quả của các em có thể được so sánh trực tiếp. Seed problem nằm trong vetted materials của lesson brief. Đây là một mô hình lai: việc tạo sinh giữ vai trò chính, còn seed do tác giả cung cấp giúp hỗ trợ đo lường.
+## Thang Scaffolding: Hỗ trợ mà không Làm hỏng Bài học
 
----
+### Ngưỡng Socratic
 
-## Scaffolding ladder: hỗ trợ mà không làm hỏng bài học
+Quy tắc không cho đáp án trực tiếp có một ranh giới rất rõ: **gia sư không bao giờ tiết lộ insight đích mà bài học được tạo ra để học sinh tự xây dựng.** Nó có thể cung cấp các dữ kiện phụ trợ — nhớ lại công thức, một bước tính toán — nếu đó không phải là điều cốt lõi đang được dạy. Ranh giới được vẽ đúng tại insight trung tâm của bài học.
 
-### Ngưỡng của Socratic
+### Các Nấc Tăng dần khi Học sinh Bị kẹt
 
-Quy tắc không đưa đáp án trực tiếp của Socratic có một ranh giới rất rõ: **gia sư không bao giờ tiết lộ insight mục tiêu mà lesson được tạo ra để học sinh tự xây dựng.** Hệ thống có thể cung cấp các dữ kiện phụ trợ — nhớ lại một công thức, một bước tính toán — nếu đó không phải chính điều đang được dạy. Ranh giới được đặt ở insight cốt lõi của lesson, chứ không phải ở mọi mẩu thông tin.
+Khi học sinh không thể tiến lên, gia sư sẽ leo dần một **graduated scaffolding ladder (thang hỗ trợ tăng dần)** thay vì cứ lặp lại cùng một câu hỏi:
 
-### Cách hỗ trợ khi học sinh bị mắc kẹt
-
-Khi học sinh không thể tiến lên, gia sư sẽ leo dần trên một **scaffolding ladder theo cấp độ** thay vì lặp lại cùng một câu hỏi. Các nấc hiện tại là:
-
-```
-Reframe  →  Hint  →  Analogous worked example
+```mermaid
+flowchart LR
+    R["Reframe"] --> H["Hint"] --> W["Analogous worked example"] --> P["Drop to prerequisite<br/>(future — needs mature belief graph)"]
 ```
 
-*(Việc lùi xuống một khái niệm tiên quyết là một nấc trong tương lai — nó cần một belief graph đủ trưởng thành để xác định đáng tin cậy phần tiên quyết còn thiếu mà không làm đứt mạch bài học.)*
+Trong phiên bản hiện tại, trợ giúp là **student-pulled (do học sinh chủ động kéo ra)**. Học sinh kích hoạt nó — bằng cách gõ "I'm stuck" hoặc bấm vào một nút gợi ý — và hệ thống sẽ chọn xem nên đưa ra nấc nào. Gia sư không ép hỗ trợ ở mọi khoảng lặng; chỉ có một lưới an toàn tối thiểu là đề nghị hỗ trợ khi tình trạng bế tắc kéo dài quá lâu, chứ không bao giờ áp đặt. Cách này mặc định giữ lại "productive struggle" (sự vật lộn có ích) và tránh phải dựng một bộ phát hiện thất vọng vốn rất dễ mong manh.
 
-Trong phiên bản hiện tại, hỗ trợ là kiểu **do học sinh chủ động kéo ra**. Học sinh là người kích hoạt — bằng cách gõ "Em bị bí", bấm nút gợi ý hoặc cách tương tự — và hệ thống sẽ chọn nấc hỗ trợ phù hợp. Gia sư không ép hỗ trợ vào mọi khoảng lặng; một lưới an toàn tối thiểu chỉ đưa ra đề nghị hỗ trợ khi tình trạng bế tắc kéo dài (nhưng không bao giờ áp đặt). Cách này mặc định giữ lại sự vật lộn có ích và tránh phải dựa vào một bộ phát hiện thất vọng dễ vỡ.
+### Vì sao Thành công nhờ Scaffolding Không được tính là Robust
 
-### Vì sao thành công nhờ scaffold không được tính là robust
+Mỗi bước scaffolding đều được đóng dấu vào evidence event. Một thành công đạt được sau khi có hint không phải là bằng chứng cho thấy học sinh có thể làm được khi không có trợ giúp — quy tắc này phản chiếu chính xác mức sàn của probing: cũng như "chưa được probe" không thể đồng nghĩa với "robust", thì "có dùng scaffolding" cũng không thể đồng nghĩa với "robust". Cả hai quy tắc đều bảo vệ tính toàn vẹn của việc đo độ mong manh.
 
-Mọi phản hồi có scaffold đều được đóng dấu lên evidence event. Một lần làm đúng nhờ gợi ý không phải là bằng chứng cho thấy học sinh làm được khi không có trợ giúp. Điều này phản chiếu đúng ngưỡng sàn của probing: cũng như "chưa được probe" không thể đồng nghĩa với "robust", thì "có scaffold" cũng không thể đồng nghĩa với "robust". Cả hai quy tắc đều nhằm bảo vệ tính toàn vẹn của phép đo độ mong manh trong mental model.
+Scaffolding cũng bị tắt hoàn toàn trong các checkpoint khóa dùng để kiểm tra predictive validity (độ giá trị dự báo), để bảo đảm hỗ trợ không rò rỉ vào một kết quả mang tính chấm đo.
 
-Scaffolding cũng bị tắt hoàn toàn trong các checkpoint khóa dùng để đánh giá predictive-validity, để hỗ trợ không thể rò rỉ vào một kết quả được tính điểm.
+## Curriculum: Tác giả là Chính, AI Bổ sung Khi Cần
 
----
+Curriculum (chương trình học) cốt lõi là **nội dung có cấu trúc do tác giả tạo ra** — một tập hợp các lesson brief. Trong một phiên học trực tiếp, AI có thể sinh thêm tài liệu bổ sung theo nhu cầu — một ví dụ mới, một bài luyện thêm — để củng cố một khái niệm cụ thể. Đây là phần bổ sung có mục tiêu cho bài học có cấu trúc, không phải thứ thay thế nó. Cấu trúc giữ cho lộ trình học tập mạch lạc; AI lấp đầy khoảng trống một cách linh hoạt.
 
-## Chương trình học: đội ngũ xây trước, AI bổ sung khi cần
+### Biên soạn có AI hỗ trợ trong Console
 
-Chương trình học chính là **nội dung có cấu trúc do đội ngũ Stemolly tạo ra** (và về sau có thể do giáo viên tạo). Đây không phải là sản phẩm lấy tạo sinh làm trung tâm: AI không viết cả khóa học. Trong một phiên học trực tiếp, AI có thể tạo thêm tài liệu bổ sung theo nhu cầu — một ví dụ mới, một bài luyện thêm — để củng cố một khái niệm cụ thể, nhưng chỉ như phần bổ trợ có mục tiêu cho lesson có cấu trúc, chứ không thay thế lesson đó.
+Trong khu vực Author của Console, AI hỗ trợ việc tạo curriculum ở thời điểm biên soạn (không phải lúc phiên học đang diễn ra). Khi được cung cấp một sách giáo khoa PDF hoặc đoạn văn bản được dán vào, nó sẽ:
 
-Mô hình lai này giúp trải nghiệm học tập giữ được tính mạch lạc. Cấu trúc được tác giả biên soạn và rà soát; sự linh hoạt đến từ việc AI lấp những khoảng trống ngay tại thời điểm cần.
+- Phác thảo **concept graph (đồ thị khái niệm)** — một prerequisite DAG cho Math, hoặc một taxonomy (phân loại) lỗi/kỹ năng cho Language.
+- Đề xuất cách các mục curriculum khớp với các canonical concept node hiện có.
+- Soạn nháp **lesson brief** — gồm goal, các bước theo thứ tự, ý đồ cho từng bước, tài liệu đã thẩm định, và một pedagogy mặc định lấy từ domain.
+- Gieo sẵn các misconception cho từng concept node.
 
-### Tác giả chương trình học xây lesson như thế nào
+Mọi bước đều là **human-in-the-loop (có con người phê duyệt trong vòng lặp)**. Tác giả sẽ xem xét, chỉnh sửa và phê duyệt từng bản nháp. Không có gì đi tới Student app nếu chưa được tác giả phê duyệt tường minh.
 
-Trong khu vực Author của Console, AI hỗ trợ tác giả ở thời điểm biên soạn (không phải lúc diễn ra phiên học). Khi được cung cấp sách giáo khoa PDF nguồn hoặc văn bản dán vào, hệ thống sẽ:
-
-- Phác thảo **concept graph** — một DAG tiên quyết cho Toán, hoặc một taxonomy lỗi/kỹ năng cho Ngôn ngữ.
-- Đề xuất cách các mục nội dung trong chương trình khớp với những concept node chuẩn sẵn có.
-- Phác thảo **lesson brief** — mục tiêu, các bước theo thứ tự, ý đồ cho từng bước, vetted materials và một pedagogy mặc định lấy từ domain.
-- Gieo sẵn các ngộ nhận cho từng concept node.
-
-Mọi bước đều có **con người trong vòng lặp**. Tác giả xem lại, chỉnh sửa và phê duyệt từng bản nháp. Không có gì được đưa tới ứng dụng Student nếu chưa có phê duyệt rõ ràng từ tác giả — AI chỉ soạn nháp, không bao giờ tự động xuất bản.
-
-Phần hỗ trợ biên soạn bằng AI này tách biệt với việc tạo nội dung bổ sung trong phiên học đã nói ở trên. Cùng một nguyên tắc lai được áp dụng ở cả hai tầng: AI tạo ra, con người xác minh.
+:::note[AI drafts, humans publish]
+AI là trợ lý soạn nháp ở giai đoạn biên soạn — nó giúp công việc nhanh hơn nhưng không bao giờ tự động xuất bản. Mọi lesson brief đến được với học sinh đều đã được một tác giả con người xem xét và phê duyệt.
+:::
 
 ```mermaid
 flowchart TD
     PDF["PDF / source text"] --> AI["AI drafts concept graph<br/>+ lesson briefs + misconceptions"]
-    AI --> Author["Author reviews & edits"]
-    Author -->|"approves"| Published["Published to Student app"]
-    Author -->|"rejects / revises"| AI
-
-    style Published fill:#d4edda,stroke:#28a745
+    AI --> Review["Author reviews & edits"]
+    Review -->|"approved"| Live["Published to Student app"]
+    Review -->|"revised"| AI
+    style Live fill:#d4edda,stroke:#28a745
 ```
+
+Sự hỗ trợ ở thời điểm biên soạn này tách biệt với việc sinh nội dung bổ sung trong phiên học. Toàn bộ schema của lesson brief được dời sang một build sprint (đợt xây dựng) sau.

@@ -37,6 +37,14 @@ sequenceDiagram
 
 The full app will need an asynchronous job runner for this Analyst step, plus a fallback for when it lags — because many students will be doing this at once. The PoC drops all of that; it is only reintroduced once real concurrency (many students at once) actually shows up. What the PoC does keep is the real shape of the two-agent design — Guide converses, Analyst diagnoses — just with Claude filling in for the in-house tutoring engine that the app will eventually run instead.
 
+### How the skills are developed
+
+The Guide session skill, the Analyst checkpoint subagent, the seed skill, and the assignment-ingestion skill are all improved by trial across real sessions — not built once to a definition of done. They are iterated continuously, by hand, gated on nothing, and belong to no planned sprint.
+
+The team rejected treating them as sprint deliverables: a tutoring prompt is only judged by how sessions actually go, and you cannot assess that before the sessions exist. What planned work *does* owe the skills is the **engine surface they call** — the anchor store, the concept-gap channel, the identifier handoff, and the evidence trail. Those are the things a skill invokes but cannot supply for itself, and that reframing is what turns skill-centered sprint scope into engine-surface sprint scope.
+
+The practical consequence: skill quality is never a gate on shipping engine work, and engine work is never blocked waiting for a prompt to be finished.
+
 ## Rules the engine enforces on the AI
 
 The MCP that Claude calls is **append-only**: its write tools can only add new evidence or propose a new catalog entry (a known misconception or reasoning pattern) — nothing lets Claude directly set a student's belief state.
@@ -90,6 +98,8 @@ One `StudyAnchor` covers one prepared unit of study — an assignment in the PoC
 
 Before a student ever touches a topic, its concept graph (nodes and prerequisite links) and catalogs (known misconceptions, reasoning patterns) must already be seeded. Seeding is **operator-only**. The operator does it by hand or through a dedicated seed skill: Claude reads the study materials, drafts nodes, edges, and catalog entries as *candidates*, and none of it is trusted until the operator approves it — the same "AI drafts, human approves" rule used everywhere else content gets authored.
 
+Note that the approval gate works differently depending on what's being approved. Catalog entries (misconceptions, patterns) are written to the database with a `candidate` status and approved afterward. Concept nodes and edges have no status column, so for the graph the gate sits **before** the write — the operator reviews the drafted list in the seed-skill transcript first, then the skill calls `seed_node`/`seed_edge`, and what lands is trusted immediately.
+
 The student's own session gets a narrower set of tools — it can read nodes and append evidence, but it can never seed or approve anything. This is enforced by **configuration, not login**: the MCP process reads which role it's running as (`MCP_ROLE`) once, when it starts, and only registers that role's tools. The other role's tools aren't refused when called — they simply don't exist for that process; a client connected to the student surface cannot even see that a `seed_node` tool exists.
 
 | Surface | Tools it exposes |
@@ -114,4 +124,36 @@ Both surfaces talk to the same database over the same connection type, so the sp
 
 This split matters even though the PoC has no other security concerns, because a Claude session that *could* approve its own drafts eventually *would* — and once a draft is promoted to trusted, there's no way to undo that by replaying history, since promotion is a decision, not a logged event.
 
-One more case the seeding rule has to cover: what happens when a session runs into a concept that was never seeded? The session records nothing for that concept, writes a note flagging it for the operator to review between sessions, and carries on with whatever it *can* record. It never invents a new concept node on the spot. Two reasons: how often this happens is itself a measurement of how good the seeding was, and quietly patching the gap mid-session would hide that signal. It also is not technically possible to record a half-approved node — only catalog entries (misconceptions, patterns) have an approval status in the schema; concept nodes do not.
+### How the tool surfaces are actually composed
+
+The operator/student split is enforced in `mcp/src/server.ts`'s `resolveToolSet` function — and reading the individual tool files `operator.ts` and `student.ts` does **not** tell you what each surface exposes. A third file, `shared-reads.ts`, holds `get_belief_state` and `match_catalog` so they can be available on both surfaces. The function spreads `shared-reads.ts` into both the student map and the operator map, so anything placed there lands on both surfaces.
+
+The consequence is that surface membership is a **placement** decision:
+
+- `operator.ts` → operator surface only
+- `student.ts` → student surface only
+- `shared-reads.ts` → **both** surfaces, regardless of intent
+
+A tool that must be operator-only or student-only cannot go in `shared-reads.ts`. Nothing in the type system signals a leak — the tool works, tests pass, and the only symptom is a capability appearing where the design said it should not. The cheap check is a test asserting that a given tool name is absent from the student map; catching any such mistake is a single assertion.
+
+### The student's identity is configuration, not a tool argument
+
+In the student MCP process, `STUDENT_ID` and `DISPLAY_LANG` are read at startup alongside `MCP_ROLE`. The tools themselves drop those fields from their inputs — the process injects the configured value before delegating to the engine. There is no field left for a model to supply, wrong or otherwise.
+
+The reason is the failure mode: a wrong anchor ID throws, the session stops, and the error is visible. A wrong student ID succeeds silently — evidence accumulates under a student who does not exist, a returning student's belief model reads back empty, and the append-only log means the misfiled records cannot be corrected. Removing the model from that path entirely is the only fix that eliminates the failure mode rather than just detecting it after the fact.
+
+### One more case: what happens when a concept is not seeded
+
+If a session runs into a concept that was never seeded, it records nothing for that concept, writes a structured note for the operator to review between sessions, and carries on with whatever it *can* record. It never invents a new concept node on the spot.
+
+Two reasons: how often this happens is itself a measurement of how good the seeding was — patching gaps mid-session would hide that signal. And it is not technically possible to record a half-approved node: only catalog entries (misconceptions, patterns) have an approval status in the schema; concept nodes do not.
+
+## A known boundary: the engine is absorbing PoC application concerns
+
+A single design session added several tables to the engine's schema — study anchors, anchor membership, concept gaps — plus operator reads over them. Each was justified individually by the PoC's constraints, and each is defensible on its own.
+
+The aggregate matters more than the individual items. In the app's module boundaries, these artifacts would not belong to the engine at all. A prepared unit of study is content's concern, and an operator work queue belongs to something Console-shaped. The engine is quietly becoming the PoC's application database.
+
+The cost is deferred rather than avoided. It comes due at the migration rehearsal, when someone has to decide per table whether each row becomes an app entity, is rewritten into a different module's schema, or is dropped. The decisions that were spread across several sessions will all land at once, and the ones that looked incidental when added are the easiest to get wrong.
+
+The mitigating property is that none of these tables is referenced by the evidence log — each remains independently droppable at the cost of one migration. That reversibility is what makes the accumulation acceptable today. It would be lost if any future decision let an evidence row point at one of them.

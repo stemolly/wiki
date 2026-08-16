@@ -1,14 +1,14 @@
 ---
-title: Bộ máy mô hình tinh thần
-description: Đồ thị niềm tin ba tầng, cách nó được hiện thực bằng event sourcing (ghi nhận theo sự kiện) chỉ ghi thêm, và cách độ chính xác của nó được kiểm chứng.
+title: Bộ máy Mental Model
+description: Belief graph (đồ thị niềm tin) ba lớp, cách nó được triển khai bằng append-only event sourcing (ghi nhận sự kiện chỉ ghi thêm), và cách độ chính xác của nó được kiểm định.
 ---
 
-belief graph (đồ thị niềm tin) là USP (điểm khác biệt cốt lõi) trung tâm của Stemolly. Phần này giới thiệu nó là gì, được xây dựng như thế nào, và độ chính xác của nó được kiểm chứng ra sao.
+belief graph (đồ thị niềm tin) là USP (điểm khác biệt cốt lõi) chính của Stemolly. Phần này trình bày nó là gì, được xây như thế nào, và độ chính xác của nó được kiểm định ra sao.
 
 ## Chủ đề
 
-**[Thiết kế mô hình tinh thần](./mental-model.md)** — Mô hình ba tầng (misconceptions, fragility, reasoning patterns), cách các belief được tổ chức thành evidence streams (luồng bằng chứng) theo kiểu event-sourced (ghi nhận theo luồng sự kiện), cùng thiết kế lưu trữ (một unified graph cho mỗi học sinh, với hybrid identity cho misconceptions và patterns).
+**[Thiết kế Mental Model](./mental-model.md)** — Mô hình ba lớp (misconceptions, fragility, reasoning patterns), cách các belief được tổ chức thành các evidence stream (luồng bằng chứng) theo mô hình event-sourced, và thiết kế lưu trữ (một unified graph cho mỗi học sinh, cùng hybrid identity cho misconceptions và patterns).
 
-**[Triển khai engine](./engine-impl.md)** — Cách đồ thị được hiện thực về mặt kỹ thuật: append-only event logs (nhật ký sự kiện chỉ ghi thêm), cách tách CQRS giữa phía ghi và phía suy diễn, ba projectors (bộ chiếu dữ liệu), mô hình nút với ba định danh (uuid/slug/display) cùng kỷ luật phân giải alias-merge, độ tin cậy và vòng đời của catalog, và các vấn đề mở đã biết (ordering, catalog ref validation, alias coverage).
+**[Triển khai Engine](./engine-impl/)** — Cách graph được hiện thực hóa về mặt kỹ thuật: append-only event log (nhật ký sự kiện chỉ ghi thêm), tách CQRS giữa phía ghi và phía suy diễn, ba projector (bộ chiếu) gồm fragility FSM, misconception FSM và pattern accumulator, mô hình node với ba định danh (uuid/slug/display) cùng kỷ luật phân giải alias-merge, độ tin cậy và vòng đời của catalog, và các bài học về cấu trúc hexagonal dành riêng cho module này. Nội dung được chia thành năm trang con tập trung.
 
-**[Kiểm chứng engine](./engine-validation.md)** — Cách Stemolly chứng minh mô hình thực sự đúng: groundedness precision (độ chính xác về mức độ bám sát căn cứ) và predictive validity (độ giá trị dự báo) là hai thước đo, chiến lược tự động hóa LLM-as-judge (dùng LLM làm bộ đánh giá), cùng kỷ luật cần thiết để giữ các thước đo đó đáng tin cậy.
+**[Kiểm định Engine](./engine-validation.md)** — Cách Stemolly chứng minh mô hình thực sự đúng: groundedness precision và predictive validity là hai thước đo, chiến lược tự động hóa LLM-as-judge, cùng kỷ luật cần thiết để giữ cho các thước đo đó đáng tin cậy.

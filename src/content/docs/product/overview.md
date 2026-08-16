@@ -1,43 +1,41 @@
 ---
 title: Stemolly Overview
-description: What Stemolly is, how it models student knowledge as a belief graph, and why the architecture is built for cheap pivoting.
+description: What Stemolly is, how its belief-graph engine works, why pedagogy is pluggable, and how the two-app MVP is structured.
 ---
 
-Stemolly is an AI-first web application that tutors students in any subject — K-12 math and science, languages, or exam prep like SAT and IELTS. The "any subject" scope is intentional: there is no hard subject boundary in the design. What makes Stemolly different from other learning tools is not the AI itself, but *how it models what a student knows* — and what it does with that model.
-
----
+Stemolly is an AI-first web application that helps students learn any subject — K-12 math and science, languages, exam preparation (SAT, IELTS), and beyond. There is no subject boundary by design. The frontend is built with Vite + React; the backend runs on Fastify. Deliberately no meta-framework (no Next.js, no Remix) — the architecture stays explicit and minimal.
 
 ## The Belief Graph: Stemolly's Core Idea
 
-Most learning platforms track whether a student has completed a topic. Stemolly tracks something different: what the student *believes*, and how solid that belief is.
+Most learning platforms track whether a student *completed* a topic. Stemolly tracks what a student *believes* — and whether those beliefs are correct, shaky, or not yet tested.
 
-Every concept is a **node** in a graph. Each node connects to the concepts it depends on (its prerequisites). A node does not carry a simple "done / not done" flag. Instead, it carries:
+The student's knowledge is stored as a **belief graph**: a graph of concept nodes connected by prerequisite edges. Each node holds:
 
 - **Misconceptions** — wrong beliefs the student holds about this concept.
-- **Fragility state** — whether this belief is *unprobed*, *fragile*, or *robust*.
+- **Fragility state** — one of three values: *unprobed*, *fragile*, or *robust* (not a numeric score).
 - **Reasoning pattern data** — how the student reaches conclusions, not just what answer they gave.
 
-Every piece of data in the graph must be backed by specific interaction evidence — not inferred from aggregate quiz scores.
+Every belief state must be backed by real interaction evidence, never inferred from aggregate test scores.
 
 ```
-         [ Arithmetic ] ← unprobed
-               │
-               ▼
-      [ Negative Numbers ] ← fragile  ←── misconception: "–3 > –1"
-               │
-               ▼
-      [ Algebra Basics ]  ← fragile   ←── diagnosis: root is Negative Numbers
+  [Negative numbers]     ← wrong belief here …
+        |
+        ↓
+  [Integer arithmetic]   ← … causes errors here …
+        |
+        ↓
+  [Algebra basics]       ← … and here
 ```
 
-This graph structure is what lets the AI find **root causes**. If a student has a wrong belief about negative numbers, that misconception propagates to every downstream concept that depends on it — algebra, inequalities, and beyond. A completion checklist would flag several topics as incomplete; the belief graph shows one root to fix.
-
----
+Because beliefs propagate along edges, a single root misconception — say, a wrong idea about negative numbers — can be traced as the cause of errors in every downstream concept. The AI can fix the root cause instead of patching each symptom separately. This is the core differentiator from platforms that only track topic completion.
 
 ## Pedagogy Is a Pluggable Layer
 
-The belief-graph engine is the product's core, and it is **domain-agnostic**. It knows nothing about which teaching style to use. That is handled by a separate, pluggable **pedagogy layer** that sits on top.
+The belief-graph engine is **domain-agnostic**. It knows about concepts, misconceptions, fragility, and evidence — but it does not know how to *talk* to a student. That job belongs to a separate, swappable **pedagogy layer**.
 
-An earlier version of the design treated the Socratic method as a foundational constraint — all tutoring, in all subjects, would follow Socratic questioning. That stance was retired. Socratic is now *one* pedagogy among several, chosen when it fits the subject.
+Think of it like a navigation app: the map (belief graph) and the turn-by-turn voice (pedagogy) are separate. You can swap the voice without rebuilding the map.
+
+An earlier version of the design treated the Socratic method as a foundational constraint baked into everything. That was revised: Socratic is now one pedagogy among several, and the engine must never hardcode it.
 
 ```mermaid
 graph TD
@@ -50,70 +48,62 @@ graph TD
 
 MVP-1 ships two pedagogies:
 
-| Pedagogy | Subjects | What it does |
+| Pedagogy | Used for | Approach |
 |---|---|---|
-| **Socratic** | Math, Physics, Chemistry | Guides the student to construct the insight through questions |
-| **Correct / Reinforce** | Language | Diagnose error → correct → reinforce → re-check |
+| **Socratic** | Math, Physics, Chemistry | Guide the student to construct the target insight through questions |
+| **Correct / Reinforce** | Language | Diagnose the error → correct → reinforce → re-check |
 
-Two rules follow from this design. First, the engine must never hardcode Socratic behavior. Second, the engine must not assume every subject has a strict dependency order — Math has a clean prerequisite tree, but Language has a looser error-and-skill taxonomy. Both must work.
-
-Adding a new pedagogy in the future should not require touching the engine.
-
----
+One structural consequence: the engine must not assume concepts always form a strict prerequisite chain. Math is a DAG (directed acyclic graph — each concept depends on earlier ones in order); Language is a looser taxonomy of errors and skills. Both must work.
 
 ## Two Apps, Three Jobs
 
-The product ships as two separate frontend applications.
+The MVP ships as two separate frontend applications.
 
 ```mermaid
 graph LR
     Student["Student App"]
-    Console["Console"]
-    Learn["Learn<br/>(Socratic lesson)"]
+    C["Console"]
+    Learn["Learn<br/>(AI-driven lesson)"]
     Author["Author<br/>(build curriculum)"]
     Observe["Observe<br/>(track progress)"]
     Student --> Learn
-    Console --> Author
-    Console --> Observe
+    C --> Author
+    C --> Observe
 ```
 
-**Student app** — the tutoring experience. Students interact with the AI tutor here; this is the "Learn" job.
+**Student App** — the learning experience. Students work through AI-driven lessons here (the "Learn" job).
 
 **Console** — the educator and operator tool. It has two areas:
-- *Author*: build and edit curriculum, lessons, and content.
-- *Observe*: monitor student progress and verify that the belief-graph engine is diagnosing correctly.
+- **Author**: build curriculum, lessons, and concept graphs.
+- **Observe**: monitor student progress and verify that the belief-graph engine is diagnosing correctly.
 
-The Console was originally called "Studio" when it only did authoring. The name changed when Observe was added, because a two-job tool needed a name that did not imply a single purpose.
+The Console was previously called "Studio" when it only did authoring. It was renamed once Observe was added, because a two-job tool needed a name that did not imply a single purpose.
 
-A third standalone app just for progress visualization was considered and rejected for MVP. Splitting Observe into its own app is only worth doing if its users — say, parents or school admins — diverge from the educators who also author. That is not true at MVP stage.
+A standalone third app just for progress visualization was considered and rejected for MVP. Splitting Observe into its own app only makes sense if its audience (parents, school admins who never author) later diverges from the Author audience. The backend still keeps content and student-state as separate service boundaries regardless of frontend shape.
 
-The backend keeps content data and student-state data in separate service boundaries, regardless of how many frontends exist.
+## Evolvability Comes First
 
----
+MVP-1 is a **validation instrument** — its job is to test whether the belief-graph engine actually works. The team should expect to be wrong about specifics and to change course based on what the data shows.
 
-## Evolvability: Why the Architecture Is Built This Way
+This is why evolvability is the primary non-functional requirement (NFR):
 
-MVP-1 exists to **validate** the belief-graph engine. The team expects to be wrong on specifics — wrong about which pedagogies land well, which subjects to prioritize, how the graph structure should work. The architecture is built to make those corrections cheap.
+- Adding a new subject or curriculum should not require touching the engine core.
+- Swapping or adding a pedagogy is a per-session configuration, not a rebuild.
+- Graph-structure and node-identity decisions are made so that new content slots in without rewiring existing code.
 
-Concretely this means:
+The technology stack is deliberately left as an architecture-phase decision — it is not fixed at the product requirements level, because locking it there would be the wrong altitude for that choice.
 
-- Changing or adding a **pedagogy** does not touch the engine core.
-- Adding a new **subject** slots in without a rebuild, because node-identity and graph-structure choices are made to be open.
-- **Pivoting direction** mid-validation should cost a sprint, not a rewrite.
+:::tip
+If you are deciding where to make a change — new subject, new pedagogy, new curriculum — the goal is always to touch the pluggable layer, not the engine core.
+:::
 
-Evolvability is the primary non-functional requirement — not performance, not zero-downtime deployment. Those matter, but they are secondary to staying cheap to change while the team learns what actually works.
+## Quick Reference
 
-This principle also explains some technology choices: the stack uses Vite + React on the frontend and Fastify on the backend, with no framework magic (no Next.js or Remix). Keeping the architecture explicit means there is no hidden plumbing to fight when the team needs to rewire something.
-
----
-
-## Quick-Reference Summary
-
-| Dimension | What Stemolly does |
+| Dimension | Detail |
 |---|---|
 | **Subject scope** | Any — K-12, languages, certifications |
-| **Knowledge model** | Belief graph (nodes, misconceptions, fragility, evidence) |
+| **Knowledge model** | Belief graph — nodes, misconceptions, fragility state, evidence |
 | **Pedagogy** | Pluggable layer; Socratic and Correct/Reinforce ship in MVP-1 |
-| **Apps** | Student app (Learn) + Console (Author + Observe) |
+| **Apps** | Student App (Learn) + Console (Author + Observe) |
 | **Primary NFR** | Evolvability — cheap to extend and pivot |
 | **Stack** | Vite + React / Fastify, no meta-framework |

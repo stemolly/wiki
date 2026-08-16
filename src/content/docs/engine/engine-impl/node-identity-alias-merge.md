@@ -1,6 +1,6 @@
 ---
 title: Node Identity and Alias-Merge
-description: The three names one concept carries, what happens when two turn out to be the same concept, and the long-running effort to get that merge right everywhere the engine reads a node id.
+description: The three names one concept carries, slug mutability and the study anchor, finding existing slugs safely, what happens when two concepts turn out to be the same, and the discipline extended to the operator surface.
 ---
 
 A concept in the engine is called a "node." Every node carries three different names, for three different readers, and none of them can be dropped or merged into another:
@@ -12,6 +12,59 @@ A concept in the engine is called a "node." Every node carries three different n
 | `display_name` (a per-locale text map) | No — may be reworded or translated any time | Yes | Humans, in their own language |
 
 The uuid is stable but meaningless; the display name is meaningful but volatile; the slug is the only one that is both stable and meaningful, which is exactly what a language-processing, non-database caller like a model needs. Collapsing any two costs something concrete: making the slug the primary key would break the promise that an id never carries meaning, since renaming a concept would then have to rewrite every reference to it or else strand old evidence; dropping the slug forces model-facing code back onto a uuid nobody can read or verify; dropping the localized name leaves nothing legible to a human, or to a model working in a language other than English. This three-way split is also why author-written names (node names, catalog entry labels) are stored as a locale map directly in the row, rather than in a frontend translation file — the set of names grows after deploy, as an author approves new content, so a build-time translation file would always be stale.
+
+## Slugs are mutable — only the uuid is durable
+
+A slug looks stable in practice, but it is in the same class as `display_name`: a mutable display key. This matters everywhere something needs to remember *which node* — **the only durable reference to a node is its uuid**, and only `core/module.ts` may turn that uuid back into a current slug.
+
+This was settled not by convention but by a concrete design question. A new artifact — the study anchor — needed to hold node references. The answer decided everything: because a slug can be renamed, an anchor storing bare slugs would be orphaned by any rename event. So the anchor stores ids, and can only be read through the engine.
+
+The two drift cases behave differently and only one is safe:
+
+- After a **merge**, a stored slug still works — the merged-away row keeps its slug, and `resolveSlugs` finds it and forwards to the survivor.
+- After a **rename**, a stored slug resolves to nothing, and `appendCheckpointBatch` throws and discards the whole checkpoint's observations rather than silently attaching them to a wrong or missing node.
+
+Declaring slugs *immutable* was the close alternative and lost on one point: a slug naming the *wrong concept* is not cosmetic, and the only fix would then be seed-a-new-node-and-merge — permanently recording the two as one concept when one was simply a mistake. The rename operation is deliberately not built; the constraint on stored references binds without it. The part the engine cannot enforce is a slug written into a file, a skill prompt, or a transcript — those are exactly the places where it is most likely to appear.
+
+## Finding an existing slug: bounded lookup only
+
+A second ingestion run — covering concepts the first run already seeded — creates a practical problem. The anchor must carry those existing slugs spelled exactly, or `appendCheckpointBatch` throws. But neither `resolveSlugs` nor `lookupSlugs` can supply them: both require the caller to already hold the reference. And `seedNode` is an idempotent upsert on `slug`, so a second spelling of the same concept silently creates a second node and splits that concept's evidence permanently, in a table whose trigger blocks `UPDATE` and `DELETE`.
+
+The answer is `GraphRepository.matchNodes(terms, limit?)`, backed by `pg_trgm` (PostgreSQL's trigram similarity extension) over `slug` and the `display_name` JSON values. It returns `{ slug, displayName, score }` with hits alias-resolved in `core/module.ts`, and it is surfaced only as the `match_nodes` tool on the **operator** MCP tool-set — never on the student surface.
+
+Three properties make it a genuine bound rather than a convention:
+
+1. An empty `terms` argument throws — the tool cannot be called without naming what you seek.
+2. The engine owns a maximum `limit` ceiling the caller cannot exceed.
+3. A minimum similarity threshold in SQL means a term resembling nothing returns nothing.
+
+A per-call row cap alone would not do the job: a caller could issue the same read repeatedly with different terms and accumulate the full graph a page at a time. What actually stops that is the relevance threshold — iterating junk terms buys no rows, so obtaining a reference requires already knowing roughly what you are looking for. That is exactly the property a preparer at a second ingestion run is supposed to have.
+
+The boundary that ADR-030's original no-listing rule was protecting is still intact: anchor *membership* comes from the material, and the lookup answers only "what is this concept already called?" — never "what concepts belong here?"
+
+## The study anchor
+
+A study anchor is the closed list of `{ slug, displayName }` pairs a prepared unit of study carries. It is how a session model knows which concept slugs exist for the material it is covering — without any enumeration of the graph.
+
+Because slugs are mutable, an anchor cannot store names. Because only `core/module.ts` may turn ids into slugs, an anchor holding ids cannot live outside the engine. This ruled out the obvious option: an operator-owned file in the repository.
+
+The engine's anchor tables are:
+
+- `engine.study_anchors` — one row per anchor, with the preparer's readable natural key and a label.
+- `engine.study_anchor_nodes` — membership as **uuid foreign keys** to `engine.nodes`.
+
+When an anchor is read, the engine forward-resolves each stored id through the merge map, then to its current slug. A member whose node was merged away is served under the survivor's name.
+
+The write surface is two explicitly-named operations — not `seed*`, because an anchor is not an open growing collection:
+
+- **Create**: throws if an anchor with that id already exists.
+- **Replace members**: a full-state write that explicitly replaces the current membership set.
+
+:::note
+The `seed*` verb is a semantic promise in this engine — every `seed*` operation is an idempotent upsert into an open, growing collection. An anchor is a closed list written whole, so borrowing the same verb would silently mislead any caller who had learned that `seed_node` is additive. The destructive operation carries the destruction in its name.
+:::
+
+Two load-bearing properties must not be weakened later. Anchor **membership** still comes from the study material, never from a query against the graph — the lookup that supplies spelling can never become one that supplies contents. And there is **no anchor-listing operation on any surface**: an anchor is read by an id the caller was given, because listing them would let a handful of calls reassemble the graph.
 
 ## When two concepts turn out to be one
 

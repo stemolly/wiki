@@ -1,13 +1,13 @@
 ---
-title: Khả năng quan sát & khả năng chống chịu
-description: Ghi log Pino có kiểm tra schema, truy vết RequestContext tường minh, một khung phản hồi lỗi duy nhất với các tầng leo thang cho LLM, và khả năng chịu lỗi của worker trong cùng tiến trình.
+title: Khả năng quan sát và khả năng chống chịu
+description: Ghi log Pino có kiểm tra schema, lần vết RequestContext tường minh, một error envelope duy nhất với các tầng leo thang cho LLM, và khả năng chịu lỗi của worker trong cùng tiến trình.
 ---
 
 Cách Stemolly tiếp cận observability (khả năng quan sát) và resilience (khả năng chống chịu) dựa trên hai trụ cột bổ trợ lẫn nhau. Thứ nhất là structured, schema-enforced logging (ghi log có cấu trúc, được schema ràng buộc), giúp mọi request đều truy vết được — từ byte HTTP đầu tiên đến token LLM cuối cùng — bằng một bộ trường cố định đi cùng một đối tượng context tường minh. Thứ hai là chiến lược fault-tolerance (khả năng chịu lỗi) theo nhiều lớp, tách rõ những gì tuyệt đối không được mất (evidence log) khỏi những gì có thể suy giảm an toàn, và biến ranh giới đó thành điều được ép buộc bằng code thay vì chỉ là quy ước.
 
 ---
 
-## Structured Logging: Hợp đồng trường dữ liệu
+## Ghi log có cấu trúc: hợp đồng trường dữ liệu
 
 Mọi dòng log trong hệ thống đều đi qua một logger dùng chung — `server/src/logger/index.ts`, chạy trên [Pino](https://getpino.io/) và tích hợp với logger có sẵn của Fastify. Điểm vào duy nhất này buộc toàn bộ hệ thống phải dùng cùng một bộ trường cố định.
 
@@ -57,7 +57,7 @@ pino({
 
 ---
 
-## Kiểm thử logger thật: Vì sao phải dùng subprocess
+## Kiểm thử logger thật: vì sao phải dùng subprocess
 
 Pino ghi log ra file descriptor thông qua thư viện [sonic-boom](https://github.com/mcollina/sonic-boom), nên nó đi vòng qua `process.stdout.write` hoàn toàn. Monkey-patch hoặc spy vào `process.stdout` sẽ không bắt được gì. `createLogger()` cũng không cho phép tiêm một destination stream tùy ý.
 
@@ -132,9 +132,9 @@ Khả năng fallback chéo giữa các provider được **bật mặc định c
 
 ---
 
-## Fault Tolerance: Bảo vệ, suy giảm, không bao giờ dồn người dùng vào ngõ cụt
+## Khả năng chịu lỗi: bảo vệ, suy giảm, không bao giờ đẩy học sinh vào ngõ cụt
 
-Job worker chạy các tác vụ bất đồng bộ (chấm điểm, ghi evidence) nằm **trong cùng tiến trình Node** với HTTP server. Đây là một lựa chọn kiến trúc có chủ đích ở quy mô cohort hiện tại — tách worker thành một tiến trình riêng được quản lý độc lập sẽ làm tăng độ phức tạp vận hành trước khi đội ngũ thực sự cần đến nó. Nhưng nếu một job hỏng nặng, trong tình huống xấu nhất nó vẫn có thể kéo sập cả tiến trình dùng chung. Chiến lược fault-tolerance ở đây không phớt lờ thực tế đó, mà làm cho phạm vi ảnh hưởng trở nên tường minh và có giới hạn.
+Job worker chạy các tác vụ bất đồng bộ (chấm điểm, ghi evidence) nằm **trong cùng tiến trình Node** với HTTP server. Đây là một lựa chọn kiến trúc có chủ đích ở quy mô cohort hiện tại — tách worker thành một tiến trình riêng được quản lý độc lập sẽ làm tăng độ phức tạp vận hành trước khi đội ngũ thực sự cần đến nó. Nhưng nếu một job hỏng nặng, trong tình huống xấu nhất nó vẫn có thể kéo sập cả tiến trình dùng chung. Chiến lược fault-tolerance ở đây không phớt lờ thực tế đó, mà biến bán kính ảnh hưởng thành thứ được nêu rõ và khống chế được.
 
 Triết lý điều phối gồm ba phần:
 
@@ -155,7 +155,7 @@ Triết lý điều phối gồm ba phần:
 
 ---
 
-## Fire-and-Forget Metering: Quy tắc `.catch()`
+## Đo đạc kiểu fire-and-forget: quy tắc `.catch()`
 
 Module LLM phát ra sự kiện `'llm.response'` khi một lời gọi model hoàn tất. Một observer kết hợp sẽ lắng nghe sự kiện này, cộng tổng token, tính chi phí theo mức giá của tier, rồi gọi `metering.recordLlmCall(...)` — **cố ý không `await`**. Một lần ghi billing chậm hoặc lỗi không bao giờ được phép chặn hay làm hỏng lượt tương tác của học sinh.
 

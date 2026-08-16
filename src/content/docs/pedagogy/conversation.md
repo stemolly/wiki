@@ -1,9 +1,9 @@
 ---
 title: Conversation & Internationalisation
-description: Open plugin mechanism for message types, Markdown+KaTeX render pipeline, envelope ordering, and three independent language axes.
+description: How Stemolly's open plugin mechanism, Markdown+KaTeX render pipeline, and three independent language axes work together to power the tutoring conversation.
 ---
 
-Every exchange between the student and the tutor passes through three interlocking systems: a plugin mechanism that keeps message types open-ended, a render pipeline that safely formats Markdown and maths, and a dual-language model that lets the tutor coach in the student's own language while the subject content stays in the target language. This page explains how those three systems work and — crucially — why they were built the way they were.
+Every exchange between the student and the tutor passes through three interlocking systems: a plugin mechanism that keeps message types open-ended, a render pipeline that safely formats Markdown and maths, and a language model that lets the tutor coach in the student's own language while the subject content stays in the target language. This page explains how those three systems work and — crucially — why they were built the way they were.
 
 ---
 

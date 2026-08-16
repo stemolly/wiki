@@ -144,3 +144,17 @@ The correct way to write scope:
 > *"The engine module's model-facing boundary, whichever transport carries it: the PoC's MCP tool surface today, the in-process checkpoint-job call later."*
 
 Findings drawn from a temporary artifact belong in the `Evidence` section — they read as observations about the current instance rather than as the permanent limit of what the decision governs. The rule of thumb: **if an identifier can be retired on a schedule, it cannot appear in a document that outlives schedules.** Boundaries and capabilities survive a rewrite; file paths into a disposable shell do not.
+
+### When to Supersede vs. Correct in Place
+
+Immutability has a boundary, and understanding it prevents two opposite mistakes: editing a record that should be superseded, and superseding a record that should simply be corrected.
+
+**Over-broad wording in an accepted ADR** — when an accepted ADR forbids more than its own reasoning supports, the remedy is supersession even when a direct edit would be cheaper by citation count. The citation count is not the deciding factor for two reasons. First, another accepted ADR may name the first as a `Precedent:` — editing the body moves the ground under a record that is itself binding. Second, "it was only a drafting error" is permanently available as an argument against any record someone later disagrees with, including an agent running unattended; the corpus's only protection is that bodies do not move. The superseding record is the better artifact anyway: it restates the rule at the granularity that was always meant, carries surviving clauses forward verbatim, and leaves the original on disk as history — where the over-broad sentence explains why the forbidden capability was never built.
+
+**False verified claims in an uncommitted draft** — a same-session draft that has not yet been committed or cited by anything is a draft, not case law. Superseding it would preserve the false claim in the corpus forever, which is worse for future readers than a clean correction. The safeguards that keep this from becoming a loophole: the correction is disclosed rather than silent, the decision that rested on the false fact is re-derived rather than patched, and the option that was wrongly rejected because of it is written into the record's `Rejected options` as what was drafted before the file was actually read.
+
+:::note[The upstream lesson]
+A `verified` label is only worth what the verification actually touched. A claim about which files compose a surface must be checked against the file that composes it — not against files whose names suggest they do.
+:::
+
+The two rules together draw a clear line: **commitment and citation are the threshold**. Before that threshold, correct the record cleanly. After it, supersede.

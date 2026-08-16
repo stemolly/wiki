@@ -1,7 +1,174 @@
 ---
 title: Mental Model Design
-description: The three-layer student belief graph — misconceptions, fragility, and reasoning patterns — what each layer means, how beliefs are structured, and why the model is the core USP.
+description: How Stemolly represents what a student actually believes — a three-layer belief graph built from event-sourced evidence, with one unified model per student spanning all domains.
 ---
+
+Every tutoring system tracks whether a student answers questions correctly. Stemolly tracks something deeper: *what the student actually believes*, how firm that belief is, and the habits of thinking that cause mistakes across many topics at once. This page explains the data model that makes that possible — three distinct layers, one unified graph per student, all built from evidence that persists across sessions.
+
+## Three Layers of Understanding
+
+The mental model is not a score. It is a graph with three overlapping layers, each answering a different question about how the student thinks.
+
+```mermaid
+graph TD
+    RP["Reasoning Patterns<br/>(student level — cross-concept habits)"]
+    MC["Misconceptions<br/>(per concept — wrong beliefs)"]
+    FR["Fragility<br/>(per concept — depth of understanding)"]
+
+    RP -->|"cause"| MC
+    RP -->|"cause"| FR
+    MC -->|"can crystallize from"| FR
+```
+
+| Layer | What it captures | Where it lives |
+|---|---|---|
+| **Misconceptions** | Specific named wrong beliefs | Per concept node, per student |
+| **Fragility** | How deep correct answers actually are | Per concept node, per student |
+| **Reasoning patterns** | Cross-topic habits that cause mistakes | Student level, spans all concepts |
+
+These layers are not independent. A fragility probe — asking *why does this work?* in an unfamiliar context — often surfaces a named misconception. And both fragility and misconceptions frequently trace back to a reasoning pattern: a student who never checks their work will have fragile knowledge in many areas at once.
+
+### Misconceptions
+
+A misconception is a specific wrong belief, recorded as a statement tied to the session where it was first observed — for example, *"believes (a+b)² = a² + b²"*. It is only marked resolved when the student demonstrates correct unprompted reasoning in a **novel** context. Answering a familiar question correctly is not enough; the resolution must show the student can transfer the concept.
+
+### Fragility
+
+Fragility measures whether correct answers reflect real understanding or surface pattern-matching. A student can score well by recognising familiar question shapes without ever understanding *why* a method works. Fragility has three derived states:
+
+- **Unprobed** — correct on familiar work, but never stress-tested. Understanding is unknown.
+- **Fragile** — stress-tested and it broke. The student fails on transfer or cannot explain their reasoning.
+- **Robust** — stress-tested and it held. Transfers to new contexts and explains *why* unprompted.
+
+The load-bearing rule: **unprobed must never be treated as robust.** A student who has only seen easy, familiar problems looks identical to a true understander until probed. The engine must actively create probe moments; absence of evidence is not evidence of mastery.
+
+Fragility is derived from evidence events, just like misconceptions. A fragile spot may later crystallize into a named misconception when enough evidence accumulates.
+
+### Reasoning Patterns
+
+A reasoning pattern sits deeper in the diagnosis hierarchy than any misconception. It describes *how* a student approaches problems — habits like "reverts to guess-and-check when stuck" or "gives up when the surface form changes" — not *what topic* they are on. Because the same habit surfaces across algebra, reading, and other subjects, patterns are stored at the student level, not on any concept node.
+
+This matters for prediction. Fragility predicts a break on one specific concept. A reasoning pattern predicts breaks *by type of situation*, regardless of topic — so the engine can warn about likely trouble on a topic the student has not yet started.
+
+:::note
+A pattern is never "resolved" the way a misconception is. It is a **tendency**: it gets stronger or weaker over time and moves through *emerging → established → fading* states. A single observation is never enough; a pattern reaches *established* only after multiple observations across different concepts — the same honesty rule as "unprobed is not robust."
+:::
+
+Each pattern also carries a **valence** — productive or unproductive. Good habits (spontaneously checking an answer, asking *why* before applying a rule) are patterns worth capturing and reinforcing, not only weaknesses to fix.
+
+---
+
+## Event-Sourced Beliefs
+
+Every belief in the graph — whether a misconception or a fragility state — is stored as a **statement plus an append-only list of evidence events**. The current status and confidence are *computed* from those events, never written directly. This is intentional.
+
+```mermaid
+graph LR
+    B["Belief statement"]
+    E1["Evidence event 1<br/>session · pointer · excerpt · polarity"]
+    E2["Evidence event 2<br/>session · pointer · excerpt · polarity"]
+    E3["Evidence event 3<br/>..."]
+    S["Derived status<br/>candidate → confirmed → resolved → reopened"]
+
+    E1 --> B
+    E2 --> B
+    E3 --> B
+    B --> S
+```
+
+Each evidence event carries:
+- **Session ID** and a stable transcript pointer
+- A short **frozen excerpt** (for human audit)
+- A **polarity** — does this event *support* or *contradict* the belief?
+
+This shape gives the system four properties at once:
+
+1. **Auditable** — reviewers can read the exact excerpt that triggered a belief update.
+2. **Resolvable** — a contradicting event flips the derived status to *resolved*.
+3. **Reopenable** — a later supporting event un-resolves it. Nothing is ever deleted.
+4. **Grounded** — every belief is backed by specific interaction evidence, never an AI guess.
+
+Reasoning patterns use the same event-sourced pattern, but their evidence accumulates across many sessions and many concept nodes, which is how the engine derives the pattern's scope.
+
+---
+
+## Misconception Identity: Hybrid Catalog
+
+When the engine detects a misconception it faces a naming problem: free-text descriptions vary across students, so the same wrong belief might be recorded in dozens of different wordings. You cannot aggregate "how many students hold this misconception" without a shared identity.
+
+Stemolly uses a **hybrid approach**:
+
+1. **Record first** — the belief is always written as free text immediately, so nothing is missed.
+2. **Match if possible** — if a canonical catalog entry already exists for this concept, the engine attempts a semantic match and assigns a `canonical_id`. On high confidence it links immediately; otherwise it leaves `canonical_id` null.
+3. **Promote later** — unmatched free-text beliefs accumulate. When enough of them describe the same misconception, a human reviews and creates a canonical entry, backfilling all matched beliefs.
+
+The catalog **starts empty**. Early beliefs are pure free text. Canonical entries grow from real student data, not from upfront authoring. This avoids the failure mode of a fixed catalog that is blind to novel misconceptions the authors did not anticipate.
+
+```mermaid
+flowchart LR
+    DetectBelief["New belief detected<br/>(free text)"]
+    CatalogExists{"Catalog entry<br/>exists?"}
+    HighConf{"Semantic match<br/>confidence high?"}
+    LinkNow["Assign canonical_id<br/>immediately"]
+    LeaveNull["Leave canonical_id null<br/>(queue for later)"]
+    Accumulate["Accumulate unmatched<br/>free-text beliefs"]
+    HumanReview["Human review:<br/>create canonical entry,<br/>backfill beliefs"]
+
+    DetectBelief --> CatalogExists
+    CatalogExists -->|yes| HighConf
+    CatalogExists -->|no| LeaveNull
+    HighConf -->|yes| LinkNow
+    HighConf -->|no| LeaveNull
+    LeaveNull --> Accumulate
+    Accumulate --> HumanReview
+```
+
+:::caution
+Auto-match only runs against already human-approved catalog entries. Creating a new entry from an unconfident match could corrupt downstream aggregation counts. That is why *promotion* (creating a new canonical entry) requires human approval in the MVP.
+:::
+
+Reasoning patterns use the same hybrid model but **lean much harder toward the catalog**. The set of possible reasoning patterns is small and stable — unlike the endless variety of misconceptions — so patterns are almost always matched to a pre-made catalog entry, with free text only for rare novel habits.
+
+---
+
+## One Graph Per Student, Across All Domains
+
+Each student has **one unified belief graph** covering every domain — Math, Language, and others — not a separate graph per subject. This is required by the cross-cutting nature of reasoning patterns: a shallow habit that surfaces in both algebra and reading is one pattern on one model.
+
+Two distinct things share the name "graph":
+
+| | Description | Shared or per-student? |
+|---|---|---|
+| **Concept graph** | Authored nodes, prerequisite edges, canonical labels, seeded misconceptions | Shared across all students |
+| **Per-student belief state** | Which misconceptions this student holds, fragility per node, evidence events | Per-student; references concept nodes by ID |
+
+The concept graph is the terrain. Each student's belief state is their position on that terrain.
+
+### Language-Neutral Concept Nodes
+
+A concept's identity is a **language-neutral ID**, not a name in any language. The canonical label is English (the lingua franca for concept naming), and display names are stored as a localized map on the node row itself. This ensures that the mathematical concept "factoring a quadratic" is the same node whether taught in Vietnamese K11 or English SAT — one node, one place where all evidence from all curricula accumulates.
+
+Splitting concepts by language would silo a student's understanding and destroy the cross-curriculum transfer signal the belief graph exists to capture. Mathematical misconceptions like *(a+b)² = a²+b²* are symbolic and inherently language-neutral.
+
+### Domains and Curriculum Overlays
+
+Domains (Math, Language…) are near-disjoint subgraphs with almost no cross-domain prerequisite edges. They are partitioned within the single store by a domain tag on each node. Curricula (K11, SAT-Math, IELTS) are **overlays** — they map curriculum-specific concepts onto shared nodes, many-to-one where granularity differs, with matches curated by a human via AI proposal.
+
+Cross-cutting layers — reasoning patterns and the prediction log — are stored on the student, not in the graph, because they have no single node to live on.
+
+---
+
+## What Students See (and Don't)
+
+In the MVP the belief graph has **no student-facing screen**. It runs in the background as the engine that feeds context to the Socratic AI. Students experience value through the quality of the lessons themselves — the feeling of understanding, completing problems, gaining insight — not by inspecting their own graph.
+
+The graph is visible only in the **Console's Observe area**, where the Stemolly team monitors it to confirm the engine is working correctly. Showing students their own belief graph is deferred; it is a UX and rendering concern, not a technical prerequisite for the core product.
+
+---
+
+## Why Beliefs Must Persist
+
+The mental model must be loaded at the start of every session and carried forward. Resetting it per session would destroy the product's core value: the ability to track how a student's thinking *evolves* over time and to revisit unresolved misconceptions weeks later. A student who resolved a misconception in one session but then regresses — a later supporting event reactivates it — is information the system must never throw away.
 
 Stemolly's core claim is that it can see *how a student thinks*, not just what answers they produce. That claim lives entirely in the **belief graph** — a persistent, per-student model built up over many sessions. The graph has three layers: **misconceptions** (specific wrong beliefs), **fragility** (how shallow correct answers actually are), and **reasoning patterns** (deep habits that cut across subjects). Together they let the Socratic AI ask the right question at the right moment, and they let the team observe exactly how a student's thinking evolves. Without persistence across sessions, none of this is possible — resetting the model each session would destroy the product's core value.
 

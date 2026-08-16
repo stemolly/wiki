@@ -1,6 +1,6 @@
 ---
 title: Engine Implementation
-description: How the engine turns an append-only log of student observations into rebuildable belief state — event sourcing, the three belief projectors, node identity, and catalog lifecycle.
+description: How the engine turns an append-only log of student observations into rebuildable belief state — event sourcing, the three belief projectors, node identity and the study anchor, and catalog lifecycle.
 ---
 
 The engine's whole job is to turn raw, observed student behavior into a trustworthy picture of what a student believes — without ever losing the ability to change its mind about how it computes that picture. It does this with one big structural choice: record observations permanently, and treat everything the engine "knows" about a student as something computed fresh from those records, not something stored and edited directly.

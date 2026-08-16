@@ -5,6 +5,47 @@ description: How a misconception or reasoning-pattern catalog entry moves betwee
 
 Every misconception and reasoning pattern the engine can recognize lives as a row in a catalog, and that row carries a trust status. This page covers how that status moves, and why moving it never requires touching the underlying belief data at all.
 
+## Where the human approval gate sits
+
+"AI drafts, human approves" sounds like one rule, but the engine enforces it in two different places depending on the artifact.
+
+**For graph nodes and edges**, the gate is *before* the write. `engine.nodes` and `engine.edges` have no status column — `seedNode` and `seedEdge` are idempotent upserts that land as trusted the instant they are called. So the operator must read the drafted list in the conversation and only then call `seed_node`. The concept lives in the transcript as a draft until the human says yes.
+
+**For catalog entries**, the gate is *after* the write. Because the catalog tables carry four statuses with three legal transitions, an entry can be persisted as `candidate` and judged after the fact, via `approve_candidate`, `reject_candidate`, and `reopen_candidate`.
+
+Adding a status column to `engine.nodes` to make the two symmetric was rejected. A node is inert until evidence hangs on it; a wrong display name is corrected by re-seeding the same slug; and a wrong identity is repaired by `mergeNodes`. The column would add a gate that already exists for free in the conversation flow, while costing a migration and an ADR.
+
+:::caution
+When reading anything that says nodes are "seeded as candidates", be careful: for the graph, that means *drafted in the transcript and never persisted until approved* — not persisted in a candidate state. Only the catalog has a candidate state to persist into.
+:::
+
+## Reporting unseeded concepts: concept gaps
+
+When a tutoring session meets a concept nobody seeded, the session records nothing for that concept and reports the omission rather than inventing a node. Those reports need a destination — otherwise the signal is a sentence in a chat window that ends when the session ends.
+
+`engine.concept_gaps` holds those reports: one row per report, with a foreign key to the study anchor that was short, the concept as free text, and an operator-editable status:
+
+```mermaid
+stateDiagram-v2
+    [*] --> open
+    open --> resolved: operator marks resolved
+    open --> dismissed: operator marks dismissed
+    resolved --> open: reopen
+    dismissed --> open: reopen
+```
+
+`resolved` and `dismissed` are kept distinct on purpose. A real seeding miss and a concept deliberately kept out of the graph are different measurements; merging them corrupts the rate.
+
+The **rate of these reports is the only measurement of how good the seeding was** — that is the stated reason node creation was kept off the session path in the first place. Without a persistent destination the rate is unknowable.
+
+Two limits are built in and accepted. Nothing can check that a session actually *reports* a gap, so the count is a lower bound rather than the true rate. And because the concept is free text, the table counts reports rather than distinct concepts.
+
+:::note
+The existing channel for session-to-operator communication — proposing a catalog candidate — could not be reused here. Proposing a candidate requires a home node slug that resolves, so a concept with no node cannot use that path. The gap mechanism is structurally closed to exactly this case, which is why a separate table exists.
+:::
+
+
+
 ## Trust is a live read, not baked into the fold
 
 Whether a recorded misconception counts toward the headline picture of a student depends on two independent things: the folded instance's own state (`active` versus `suspected`), and the catalog entry's current status (`seeded`/`approved` versus still a `candidate`). The catalog-status half of that check is deliberately evaluated **at read time, as a join**, rather than being baked into the fold itself.
