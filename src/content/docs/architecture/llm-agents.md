@@ -1,13 +1,19 @@
 ---
 title: LLM & Agent Layer
-description: How Stemolly orchestrates multiple LLMs through the @noetaris/harness substrate, the Guide and Analyst two-agent tutor design, and the versioned Report as their sole channel.
+description: How Stemolly orchestrates vendor-agnostic tiered LLMs and the Guide/Analyst two-agent tutor over the @noetaris/harness substrate.
 ---
 
-Stemolly is not tied to any single AI provider. The system uses multiple LLMs at once, each matched to its task: cheap, fast models handle high-volume conversational turns; powerful (and expensive) models do the reasoning work that fires much less often. No part of the codebase may assume a specific vendor — Claude, GPT, Gemini, or a local model are all swappable. The agents that drive the tutor experience sit on top of this interchangeable model layer.
+Stemolly is not tied to any single LLM vendor. The system routes each task to the right model tier — cheap and fast for routine work, strong and expensive for reasoning — and every model slot is swappable without touching agent code. On top of this interchangeable layer sit two purpose-built agents that together form the tutor: the **Guide** and the **Analyst**. They communicate through exactly one channel: a versioned, persisted artifact called the **Report**.
 
-This page explains the substrate those agents are built on, the two-agent design at the heart of the tutor, how the agents talk to each other, and the operational decisions that keep the system testable, routable, and observable.
-
----
+```mermaid
+flowchart TD
+    Student["Student turn"] --> Guide["Guide agent<br/>(fast model, per-turn)"]
+    Guide -->|"reads"| Report["Report<br/>(versioned, persisted)"]
+    Guide -->|"response"| Student
+    Checkpoint["Checkpoint trigger<br/>(submission / segment / end)"] --> Analyst["Analyst agent<br/>(strong model, async job)"]
+    Analyst -->|"reads"| Engine["Engine projections & catalogs"]
+    Analyst -->|"writes new version"| Report
+```
 
 ## The @noetaris/harness substrate
 
@@ -115,7 +121,9 @@ The fields that still need definition include:
 - **Contingent guidance** — "if the student tries X, do Y" branches. This matters because the Guide may serve several turns from a single Report between checkpoints; it needs enough information to handle branching situations without calling the Analyst again.
 - The **probe-plan** and **prediction** fields.
 
-This is flagged in the design's own self-review as the **single most load-bearing open task** in the architecture. If the schema cannot express contingent guidance well, there will be pressure to run the Analyst on every turn — which would collapse the cost model the two-agent split exists to protect. As of mid-July 2026, `app/packages/contracts/src` contains only `error-envelope.ts`; the Report schema has not been coded yet.
+:::caution[Most load-bearing open task]
+If the schema cannot express contingent guidance well, there will be pressure to run the Analyst on every turn — which would collapse the cost model the two-agent split exists to protect. As of mid-July 2026, `app/packages/contracts/src` contains only `error-envelope.ts`; the Report schema has not been coded yet.
+:::
 
 ---
 

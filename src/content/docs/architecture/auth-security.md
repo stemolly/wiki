@@ -1,9 +1,9 @@
 ---
 title: Auth & Security
-description: How Stemolly handles invite-only onboarding, server-side sessions, subdomain isolation, surface-aware login, and the API namespace security model.
+description: How Stemolly manages identity, sessions, cookies, subdomain isolation, and the invite flow — and the specific constraints that keep each piece safe.
 ---
 
-Stemolly's security model is deliberately small: no public registration, no third-party auth provider, no JWTs. Every design choice flows from one constraint — a small number of fixed roles and an invite-only entry point. The goal is to keep every mechanism auditable by reading a short piece of code.
+Stemolly's authentication model is deliberately simple: invite-only access, email + password credentials, server-side sessions, and three fixed roles. Every decision in this layer was made to match the actual threat model of a small product handling minors' data — not to follow a generic best-practice checklist. The sections below walk through each piece in order, from how a user enters the system to how the browser cookie stays in the right place.
 
 ## Who Can Log In, and How
 

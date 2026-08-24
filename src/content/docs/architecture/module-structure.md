@@ -1,9 +1,9 @@
 ---
 title: Module Structure
-description: How every backend module is laid out internally — the two-ring hexagonal shape, contract naming, barrel rules, enforcement tools, and where tests go.
+description: How each backend module is laid out — the two-ring hexagonal shape, contract naming, barrel rules, dependency enforcement, and where tests live.
 ---
 
-Every backend module in this codebase follows the same internal layout: a **core ring** containing all business logic, a surrounding **adapter ring** of concrete implementations, and a single public entry point. The shape comes from hexagonal architecture (also called ports-and-adapters), but the specific names, directory paths, and enforcement mechanisms are all project decisions — not generic hexagonal conventions. This page explains each layer, why it looks the way it does, and the rules that keep it intact.
+Every backend module in Stemolly follows the same internal layout: a **core ring** containing all business logic and contracts, a surrounding **adapter ring** of concrete I/O implementations, and a single public entry point. The layout comes from hexagonal architecture (ports-and-adapters), but the specific directory names, enforcement tools, and naming conventions are all project decisions — not generic conventions. This page explains each layer, the rules that hold it together, and the sharp edges that have tripped the project before.
 
 ## The Two-Ring Layout
 

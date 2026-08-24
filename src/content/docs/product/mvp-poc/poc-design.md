@@ -148,6 +148,43 @@ If a session runs into a concept that was never seeded, it records nothing for t
 
 Two reasons: how often this happens is itself a measurement of how good the seeding was — patching gaps mid-session would hide that signal. And it is not technically possible to record a half-approved node: only catalog entries (misconceptions, patterns) have an approval status in the schema; concept nodes do not.
 
+## Assignment briefs: preparation, delivery, and checkpointing
+
+An assignment brief bundles the study material with an answer key the operator has verified. Three decisions cover how briefs are prepared and how sessions use them.
+
+### Verifying the answer key with a CAS
+
+The operator-side ingestion workflow has the model solve each problem in the brief, then checks that solution against a **computer algebra system (CAS)** rather than doing a second pass with the same model. Two passes of the same model share the same blind spots — a consistently wrong answer reproduces identically twice, the comparison comes back clean, and the wrong key ships as if it were correct.
+
+A CAS does not share those blind spots. For example, solving `2x² = 4` should produce `x = ±√2`, but a model may give only `x = √2`, dropping the negative root. The CAS returns the full set; the mismatch is caught before the operator approves the key.
+
+The known limit is that the model still writes out the equation the CAS then solves — the CAS catches arithmetic errors, not misreading errors. This is why the operator's manual review pass should focus on the *setup* of each solution (the first step, where the problem is formalized) rather than the arithmetic that follows. The CAS itself belongs entirely in the operator-side ingestion workflow, not in the engine — deciding what counts as a checkable expression requires knowing the domain is Math, which is exactly the kind of domain knowledge the engine's schema deliberately does not hold.
+
+### Brief delivery: the answer key ships with the material
+
+The assignment brief — including the answer key — is packaged into the same bundle as the study material and delivered to the student. In principle, the student can read the key herself.
+
+This is accepted as a non-concern for the PoC: the one real student is a consenting participant in an experiment, not a customer with an incentive to game the system. Alternatives — splitting the key into a withheld portion, routing it through a server-side verdict endpoint, or moving the Analyst checkpoint off her device — were all considered and rejected for this stage. Any of them becomes relevant once the artifact is used with students who are not consenting research participants.
+
+### Two checkpoints per assignment: homework submission and review session
+
+A homework assignment runs as two separate Analyst checkpoints. The student solves the assignment offline and unaided, then submits it. The Analyst runs a cold pass — no dialogue yet, just the answers — producing a report (a probe plan and contingent guidance). A later review session's Guide then walks through the problems problem by problem.
+
+The two runs are given **distinct `checkpoint_id`s**, one per Analyst run, and this matters for how the engine reads a correction:
+
+| Scenario | Checkpoint IDs | How the fold reads it |
+|---|---|---|
+| Wrong homework → right only after the Guide's review instruction | Two different IDs | **Delayed recovery** — she was corrected by instruction |
+| Wrong answer → right within the review session, from a `dependsOn` nudge alone | Same review-session ID | **Self-correction** — a stronger belief signal |
+
+`scaffold_stamp` on the review-session evidence records whether the second attempt was aided, so the fold can distinguish these cases even when they look the same from the outside.
+
+### Brief slugs are snapshots, validated at session start
+
+An assignment brief must name the concepts it covers — it cannot avoid this. But ADR-036 forbids storing a node slug as a durable reference, because slugs can be renamed and any stored copy becomes stale. The resolution: the brief carries an `anchorId` and a `briefSnapshotId`, and every concept slug it contains is treated as a **snapshot** valid only at the moment it was written.
+
+At session start, every concept name the brief contains is validated against a live `get_study_anchor(anchorId)` read. A name that no longer resolves to a current anchor member stops the session before it begins, rather than proceeding on a stale reference. Revising the brief mints a new `briefSnapshotId`. `evidence_events.brief_snapshot_id` is threaded end-to-end through `AppendCheckpointBatchInput`, so the evidence log records which snapshot of the brief was in use for each checkpoint.
+
 ## A known boundary: the engine is absorbing PoC application concerns
 
 A single design session added several tables to the engine's schema — study anchors, anchor membership, concept gaps — plus operator reads over them. Each was justified individually by the PoC's constraints, and each is defensible on its own.

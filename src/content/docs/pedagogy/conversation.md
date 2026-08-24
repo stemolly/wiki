@@ -1,30 +1,17 @@
 ---
 title: Conversation & Internationalisation
-description: How Stemolly's open plugin mechanism, Markdown+KaTeX render pipeline, and three independent language axes work together to power the tutoring conversation.
+description: How Stemolly structures its conversation plugin system, the Markdown+KaTeX render pipeline, message envelope contracts, and the three independent language axes.
 ---
 
-Every exchange between the student and the tutor passes through three interlocking systems: a plugin mechanism that keeps message types open-ended, a render pipeline that safely formats Markdown and maths, and a language model that lets the tutor coach in the student's own language while the subject content stays in the target language. This page explains how those three systems work and — crucially — why they were built the way they were.
+Every exchange in a Stemolly session — tutor prose, a quiz, a student's submitted formula, a multiple-choice question — travels through a single, open plugin mechanism. Nothing is hard-coded to a fixed set of message types, and the tutor and student sit on equal footing in that system. This page explains how the plugin system is designed, what the rendering pipeline looks like today, and how language settings work across three separate axes.
 
----
+## Everything in the conversation is a plugin
 
-## Every message is a typed plugin instance
+The core idea: every message has a `type` field, and the frontend renders the message by dispatching to the matching plugin renderer. There is no privileged message type and no privileged author.
 
-The conversation has no fixed list of message types. Whether it is the tutor's Markdown prose, a multiple-choice quiz, a reading passage, or the student's own submitted answer — including a LaTeX formula typed with a symbol palette — every message is a **typed plugin instance** that the frontend renders by looking up the right renderer for its `type` field.
+This is the **message envelope** — the fixed outer shape shared by every message:
 
-This means:
-- There is no privileged message type and no privileged author.
-- Adding a new interaction (a drag-and-drop exercise, a vocabulary game) is purely additive: write a new type and a new renderer. Nothing in the tutor engine or the core contracts needs to change.
-- Gradeable content — quizzes, exercises with a right answer — is always grounded from the authored lesson brief or the Expert agent, never improvised by the lighter Interface agent. The plugin mechanism does not change this; it just delivers the content.
-
-The full plugin interface — how a plugin declares its manifest, describes its capability to the AI agents, and registers its renderer — is deliberately not designed yet. It will be shaped once several real plugin types are in hand, so the abstraction reflects what genuinely varies across types rather than what one exemplar suggests.
-
----
-
-## The message envelope: settled first, and why that order matters
-
-Before the plugin interface is designed, one thing *is* locked: the **message envelope**.
-
-```
+```ts
 {
   id:            string,   // unique message id
   author:        string,   // "tutor" | "student" | ...
@@ -34,125 +21,85 @@ Before the plugin interface is designed, one thing *is* locked: the **message en
 }
 ```
 
-Every message crossing the wire uses this shape. Each plugin validates its own `payload`; the envelope itself is validated at the boundary between systems.
-
-### Why settle the envelope before the plugin interface?
-
-The two pieces have opposite reversibility properties.
-
-The **envelope** is just a wire format between two consumers inside one monorepo — the engine that produces messages and the frontend that renders them. As long as no transcript is persisted to a database, reshaping the envelope costs a single commit. It is a low-risk decision to make early.
-
-The **plugin interface** (manifests, config/result contracts, agent-facing capability descriptions, backend registry) has the opposite property: one plugin type cannot reveal what varies across types. Designing the interface against a single exemplar would freeze the wrong abstraction. It needs several real plugin types — at least Markdown, formula input, and multiple-choice — to inform it correctly.
-
-### The open-string `type` field
-
-The most load-bearing detail in the envelope is that `type` is an **open string**, not a TypeScript closed union like `"markdown" | "text-input"`.
-
-A closed union is the natural reflex when only one type exists. But it would turn the shared contracts package into a mandatory edit site for every plugin ever added — exactly the coupling the open plugin mechanism exists to prevent. An open string keeps the set open. Any plugin can introduce a new type without touching the shared package.
+Each plugin owns the schema for its own `payload`. The `type` field is deliberately an **open string**, not a closed TypeScript union. A closed union might feel natural when only one type exists, but it would force every future plugin to edit the shared contracts package. An open string keeps the set open: adding a new interaction type (a drag-drop exercise, a game) means adding a new type identifier and renderer, with zero changes to the tutor engine or any existing plugin.
 
 ```mermaid
 flowchart LR
-    E["Envelope<br/>{ id, author, type, payload }"]
-    E --> R{"Look up renderer<br/>by type string"}
-    R --> MD["Markdown renderer"]
-    R --> FI["Formula-input renderer"]
-    R --> MC["Multiple-choice renderer"]
-    R --> EX["... future plugins"]
+  Envelope["Message envelope<br/>{ id, author, type, payload }"]
+  Envelope --> MD["type: markdown<br/>→ Markdown+KaTeX renderer"]
+  Envelope --> MCQ["type: multiple-choice<br/>→ MCQ renderer"]
+  Envelope --> Formula["type: formula-input<br/>→ KaTeX editor"]
+  Envelope --> TI["type: text-input<br/>→ Plain text renderer"]
+  Envelope --> Dots["type: …<br/>→ future plugins"]
 ```
 
----
+:::caution
+Do not add `type` to a closed TypeScript union in the shared contracts package. That silently closes the open-plugin mechanism and makes the contracts package a mandatory edit site for every plugin ever added.
+:::
 
-## The render pipeline: Markdown + KaTeX + a sanitized allowlist
+## Why the envelope is settled before the plugin interface
 
-The default tutor renderer supports three layers of formatting:
+The full plugin interface — manifest format, config/result schemas, capability descriptions, backend registry — is deliberately deferred. The reasoning is about reversibility.
 
-| Layer | What it does |
+The envelope is the shape of every message in the transcript. While no transcript is persisted, the envelope is just a wire format between two consumers inside one monorepo; it costs a single commit to reshape. The plugin interface has the opposite property: one plugin type cannot reveal what varies across all types. Designing the interface now, against a single exemplar, would lock in the wrong abstraction. The right time to design it is once several real plugin types (markdown, formula input, multiple-choice) are in hand to inform it.
+
+## The Markdown + KaTeX render pipeline
+
+The primary render plugin today supports three things:
+
+| Capability | Detail |
 |---|---|
-| **Markdown** | Headings, lists, bold, inline code, fenced blocks |
-| **KaTeX** | LaTeX maths, rendered in the browser — a Socratic maths lesson is unusable without it |
-| **HTML decoration allowlist** | A narrow set of tags (`span`, `mark`, `sup`, `sub`) with safe attributes only |
+| Markdown | Standard CommonMark prose |
+| LaTeX math | Rendered via **KaTeX** — inline `$...$` and display `$$...$$` |
+| HTML decoration | A strict allowlist only: `span`, `mark`, `sup`, `sub`, safe attributes — no `script`, event handlers, or iframes |
 
-Raw HTML is not rendered freely. Every message — from the semi-trusted tutor LLM and from the untrusted student — passes through a DOMPurify-style sanitizer that strips `<script>` tags, event handlers (`onerror`, `onclick`, etc.), and iframes. The allowlist and sanitizer apply equally to both authors; there is no "trusted" fast path.
+Plain Markdown without formula rendering is not enough for a Socratic Math lesson — a KaTeX plugin replaced a plain-text-only approach precisely for that reason.
 
-This is the concrete render plugin that the earlier, plain-text exemplar plugin was always intended to be replaced by. Plain text was a reference example to show the pattern; Markdown+KaTeX is the real first plugin.
+**Both authors go through the same sanitizer.** The tutor LLM is semi-trusted; student content is untrusted. A DOMPurify-style sanitizer strips `<script>` tags, event handlers, and iframes before any content reaches the DOM. The sanitizer is enforced by TDD tests and a fitness function (G-15) that guards the plugin extension boundary.
 
-### The MVP starter set
+The MVP starter set of plugin types:
 
-When the full plugin mechanism is built — which happens once enough plugin types exist to inform the interface design, not on a fixed schedule — these are the initial members:
+- `markdown` — tutor prose and explanations
+- `text-input` — base student input
+- `formula-input` — student submits LaTeX via a symbol-palette editor; KaTeX renders the preview
+- `multiple-choice` — interaction plugin for quizzes
 
-- **Markdown** — tutor prose and explanations
-- **Text-input** — the student's basic free-text replies
-- **Formula-input** — student answers as LaTeX, via a KaTeX-backed symbol palette
-- **Multiple-choice** — structured quiz interactions
+Passage and essay-review plugins are planned for a later slice.
 
-Passage and essay-review plugins are planned for the Language subject slice and are deferred until then.
+## Three independent language axes
 
-The sanitizer's behaviour is locked by TDD tests and guarded by a fitness function (`G-15`) that runs alongside the plugin extension tests, so a future plugin cannot accidentally open an XSS hole.
-
----
-
-## Two languages in one conversation
-
-A student can converse with the tutor in their own language while the subject content remains entirely in the target language. Think of a Vietnamese teacher explaining an English grammar exercise in Vietnamese — the student's production and the corrected text stay in English, but the coaching happens in Vietnamese.
-
-Stemolly models this as two independent settings:
-
-| Setting | What it controls | Who sets it |
-|---|---|---|
-| **`comm_lang`** | The language the tutor speaks in | Curriculum / session design |
-| **Content language** | The language of the subject material | The authored lesson brief |
-
-These are independent. A Vietnamese student studying for IELTS has `comm_lang = vi` and content language = `en`. The tutor coaches in Vietnamese; every essay draft and correction is in English.
-
-### The third axis: UI chrome language (`ui_lang`)
-
-There is a third language in the system — the language of the interface itself: button labels, menus, error messages. This is `ui_lang`, and it is a **separate user preference** from `comm_lang`.
-
-The two are easy to conflate, but they must be kept apart for two reasons:
-
-1. **`comm_lang` is a pedagogical variable under test.** MVP-1 validates whether coaching in the student's native language improves outcomes. If a UI language switcher wrote to `comm_lang`, a student flipping a display toggle would silently change their tutoring language mid-session — corrupting the experiment data.
-
-2. **Different populations need `ui_lang` but not `comm_lang`.** Console and Admin users need their interface in a chosen language, but they are never tutored. They have a `ui_lang` and no `comm_lang` at all.
+Stemolly separates language into three independent settings. Conflating any two of them causes real problems.
 
 ```mermaid
 flowchart TD
-    U["User"]
-    U -->|"ui_lang<br/>(display preference)"| Chrome["Interface chrome<br/>buttons, menus, errors"]
-    U -->|"comm_lang<br/>(curriculum decision)"| Tutor["Tutor speech<br/>coaching & explanations"]
-    U -->|"content language<br/>(lesson property)"| Content["Subject material<br/>texts, exercises, corrections"]
-
-    style Chrome fill:#e8f4f8,stroke:#4a9aba
-    style Tutor fill:#f0f8e8,stroke:#5a9a4a
-    style Content fill:#fdf6e3,stroke:#b8860b
+  User["User account"]
+  User -->|"ui_lang<br/>(display preference)"| Chrome["UI chrome<br/>menus, labels, errors"]
+  User -->|"comm_lang<br/>(pedagogical variable)"| Tutor["Tutor conversation<br/>language"]
+  Content["Content / curriculum"]
+  Content -->|"content_lang<br/>(property of the material)"| Material["Subject material<br/>SAT, IELTS, essays"]
 ```
 
-`ui_lang` is user-controlled: the browser's language is detected automatically, English is the fallback, and a manual switcher lets the user correct wrong detections. The choice is persisted to their preferences and applied thereafter. `comm_lang` is not a user toggle — it is a decision made when the curriculum is authored.
+### Content language — a property of the material
 
----
+The content language is set on the curriculum, not on the student. A Vietnamese student studying for SAT/IELTS works with English-language material, full stop. That material stays in English regardless of how the student or the tutor is configured.
 
-## How the pieces connect
+### Communication language — a pedagogical variable
 
-The three systems described above are not independent layers. They are designed to work together:
+The communication language (`comm_lang`) is the language the tutor speaks to the student. It is independent of the content language. Think of a Vietnamese teacher explaining an English text in Vietnamese — the coaching is in Vietnamese, but the student's produced artifact (the essay, the formula) and its corrections remain in English.
 
-```mermaid
-flowchart LR
-    LLM["Tutor LLM<br/>(Interface agent)"]
-    STU["Student"]
+`comm_lang` is the variable that MVP-1 exists to test: does coaching in the student's native language improve outcomes over English-only coaching? Letting a student change it casually would alter the treatment mid-experiment and confound the results.
 
-    subgraph Envelope ["Message envelope { id, author, type, payload }"]
-        MSG["type: open string"]
-    end
+### UI chrome language — a display preference
 
-    LLM -->|"emits"| Envelope
-    STU -->|"emits"| Envelope
+`ui_lang` controls the language of the interface chrome: menus, buttons, labels, error messages. It is user-controlled:
 
-    Envelope --> SAN["Sanitizer<br/>(both authors)"]
-    SAN --> REN["Plugin renderer<br/>Markdown + KaTeX"]
-    REN --> UI["Rendered conversation"]
+1. Detected from the browser by default.
+2. English as the fallback.
+3. A manual switcher for when detection guesses wrong.
+4. The choice is persisted to user preferences and followed thereafter.
 
-    COMM["comm_lang"] --> LLM
-    UILANG["ui_lang"] --> UI
-    CONTENT["Content language"] --> LLM
-```
+:::caution
+A UI language switcher must **never** write to `comm_lang`. The two fields look similar but serve entirely different purposes and have different audiences — Console and Admin users have a `ui_lang` but no `comm_lang` at all, because they are never tutored.
+:::
 
-The plugin type drives which renderer runs. The sanitizer runs before any renderer, regardless of source. Language settings travel alongside the session but are invisible in the envelope itself — they shape what the tutor *says*, not the shape of the message it says it in.
+The separation matters because if a single "language" field covered both, a student toggling the display language mid-session would silently change their tutoring language too — breaking the validation experiment the Language slice is built around.

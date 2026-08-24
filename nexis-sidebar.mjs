@@ -23,6 +23,7 @@ export const sidebar = [
         { label: 'The Three Belief Projectors', slug: 'engine/engine-impl/projectors' },
         { label: 'Node Identity and Alias-Merge', slug: 'engine/engine-impl/node-identity-alias-merge' },
         { label: 'Catalog Entry Lifecycle', slug: 'engine/engine-impl/catalog-lifecycle' },
+        { label: 'Study Anchors and Brief Contracts', slug: 'engine/engine-impl/study-anchor-briefs' },
         { label: 'Hexagonal Structure: Engine-Specific Lessons', slug: 'engine/engine-impl/hexagonal-structure' },
       ] },
       { label: 'Engine Validation', slug: 'engine/engine-validation' },

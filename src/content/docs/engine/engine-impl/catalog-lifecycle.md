@@ -40,6 +40,16 @@ The **rate of these reports is the only measurement of how good the seeding was*
 
 Two limits are built in and accepted. Nothing can check that a session actually *reports* a gap, so the count is a lower bound rather than the true rate. And because the concept is free text, the table counts reports rather than distinct concepts.
 
+### Concurrency safety for status transitions
+
+Two operators (or two parallel requests) could simultaneously try to transition the same gap's status in opposite directions — one resolving, one dismissing. Without a guard, the last write wins silently, and one transition is lost. The engine closes this with a compare-and-swap: every `updateGapStatus` call supplies an `expectedCurrentStatus`, and the update only runs if the current stored status matches. If it doesn't match, the call throws immediately instead of fabricating a success response from a write that didn't happen.
+
+A dedicated `findGapById` lookup was added alongside this, so callers can inspect a gap's current state before transitioning it without running a full-table scan.
+
+### Filtering concept gaps by status
+
+`listConceptGaps` treats a caller-supplied `statuses: []` (an explicit empty array) as match-nothing — meaning return no rows at all — rather than collapsing it to the same behavior as an *omitted* `statuses` field (which means match every status). This distinction matters when a caller computes a status filter at runtime and that computation produces an empty list: the intent is "nothing matches these criteria," not "give me everything."
+
 :::note
 The existing channel for session-to-operator communication — proposing a catalog candidate — could not be reused here. Proposing a candidate requires a home node slug that resolves, so a concept with no node cannot use that path. The gap mechanism is structurally closed to exactly this case, which is why a separate table exists.
 :::

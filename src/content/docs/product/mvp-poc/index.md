@@ -19,5 +19,5 @@ The engine is the only durable part of the PoC. Everything around it — the Cla
 ## Pages in this topic
 
 - **[MVP-1 Product Scope](/product/mvp-poc/mvp-scope/)** — what actually ships: the Student app and Console, the Lesson-only study mode and its curriculum picker, and why Math (deep) and Language (thin) are the two launch subjects.
-- **[Engine-Validation PoC: Design & Boundaries](/product/mvp-poc/poc-design/)** — why the PoC runs before the app, how Claude plays both tutor roles, the rules that keep its data trustworthy and migratable, and the known boundary where the engine is quietly absorbing PoC application concerns.
+- **[Engine-Validation PoC: Design & Boundaries](/product/mvp-poc/poc-design/)** — why the PoC runs before the app, how Claude plays both tutor roles, the rules that keep its data trustworthy and migratable, the assignment-brief workflow (CAS key verification, checkpoint split, slug validation), and the known boundary where the engine is quietly absorbing PoC application concerns.
 - **[Running & Deploying the PoC](/product/mvp-poc/poc-ops/)** — the local runbook for the MCP over HTTP, the wire bugs the team fixed, and the full VPS deployment: hostnames, SSH-tunnel migrations, and the backup-and-restore-verification cycle.

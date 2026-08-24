@@ -1,6 +1,6 @@
 ---
 title: Teaching & Sessions
-description: How Stemolly structures lessons, applies pluggable pedagogy per session, conducts Socratic probing, offers graduated scaffolding, and supports AI-assisted authoring in the Console.
+description: How Stemolly structures lessons — pluggable pedagogy bundles, lesson and assignment briefs, Socratic probing policy, graduated scaffolding, and AI-assisted authoring in the Console.
 ---
 
 Stemolly separates **teaching intent** from **live delivery**. A human author writes a teaching brief — goals, steps, trusted materials — and the AI tutor agent conducts the live conversation from that brief. Which pedagogy the agent applies depends on the subject domain and can be overridden at the lesson level. This makes the system flexible without changing any core engine code.
@@ -50,6 +50,32 @@ The author owns:
 The tutor agent owns the live conversation. It reads the brief, picks up the active pedagogy, and improvises — asking Socratic questions for Math/Physics/Chemistry, or working a diagnose/correct/reinforce/re-check loop for Language — while staying inside the author's steps and intent. The vetted materials act as a grounding anchor: the tutor cannot fabricate content, which is critical for an education product where a wrong formula or fact causes real harm.
 
 The same brief can produce a different conversation for every student. Structure is repeatable; dialogue is not. The full lesson-brief schema is still being specified; this is the settled design direction.
+
+## Assignment Briefs: Facts, Not Procedures
+
+When a student works through uploaded homework in **Assignment Help** mode, the tutor agent needs context the assignment document does not supply. That context comes from an **assignment brief** — a companion document an author or operator writes for each assignment.
+
+One rule governs what belongs in an assignment brief: **it supplies facts the agent cannot derive from the raw material — never a diagnostic procedure.**
+
+Two corollaries follow from this single rule.
+
+**Content vs. pedagogy** — if the brief tells the agent *how to judge a wrong answer*, that logic is valid only for one pedagogy. Because pedagogy is pluggable, the brief must stay neutral and let the active strategy decide how to respond.
+
+**Problem vs. student** — the brief describes the *problem*, not the *student*. "This distractor was designed to catch students who forget to check for a negative root" is a fact about the problem's design. "Students commonly miss step 3" is a prediction about people — it does not belong in the brief.
+
+An early draft brief violated this rule by listing per-step failure-mode labels (e.g. `fails: misses-negative-root`) so the agent could match a wrong answer to a named category. This was rejected: it preempts the Socratic dialogue's job of discovering what the student *actually believes*, and it only makes sense under one pedagogy.
+
+The accepted brief states:
+- The **crux** — the one insight the problem tests.
+- Which **concepts** it exercises.
+- Which **solution methods** are in-syllabus.
+- Where a bare-correct answer is still uninformative.
+
+These are facts the agent *reasons from*, never verdicts it looks up.
+
+:::caution[Brief ≠ answer key]
+An assignment brief that lists named failure modes or expected student mistakes crosses into diagnostic procedure territory. The brief describes the problem; diagnosis is the tutor agent's job.
+:::
 
 ## Probing: How the Socratic Tutor Surfaces Fragility
 

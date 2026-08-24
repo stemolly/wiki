@@ -1,9 +1,9 @@
 ---
 title: Stemolly Overview
-description: What Stemolly is, how its belief-graph engine works, why pedagogy is pluggable, and how the two-app MVP is structured.
+description: What Stemolly is, how its belief-graph engine works, why pedagogy is pluggable, how the two-app MVP is structured, and the principles that guide its architecture.
 ---
 
-Stemolly is an AI-first web application that helps students learn any subject — K-12 math and science, languages, exam preparation (SAT, IELTS), and beyond. There is no subject boundary by design. The frontend is built with Vite + React; the backend runs on Fastify. Deliberately no meta-framework (no Next.js, no Remix) — the architecture stays explicit and minimal.
+Stemolly is an AI-first web application that helps students learn any subject — K-12 math and science, languages, exam preparation (SAT, IELTS), and beyond. There is no subject boundary by design. The frontend is built with Vite + React; the backend runs on Fastify. No meta-framework (no Next.js, no Remix) — the architecture stays explicit and minimal.
 
 ## The Belief Graph: Stemolly's Core Idea
 
@@ -53,7 +53,7 @@ MVP-1 ships two pedagogies:
 | **Socratic** | Math, Physics, Chemistry | Guide the student to construct the target insight through questions |
 | **Correct / Reinforce** | Language | Diagnose the error → correct → reinforce → re-check |
 
-One structural consequence: the engine must not assume concepts always form a strict prerequisite chain. Math is a DAG (directed acyclic graph — each concept depends on earlier ones in order); Language is a looser taxonomy of errors and skills. Both must work.
+One structural consequence: the engine must not assume concepts always form a strict prerequisite chain. Math is a DAG (directed acyclic graph — each concept depends on earlier ones in order); Language is a looser taxonomy of errors and skills. Both must work with the same engine.
 
 ## Two Apps, Three Jobs
 
@@ -81,6 +81,27 @@ The Console was previously called "Studio" when it only did authoring. It was re
 
 A standalone third app just for progress visualization was considered and rejected for MVP. Splitting Observe into its own app only makes sense if its audience (parents, school admins who never author) later diverges from the Author audience. The backend still keeps content and student-state as separate service boundaries regardless of frontend shape.
 
+## Access and Roles
+
+MVP-1 has no public sign-up. An Admin invites a user by email and assigns a role. The invitee follows an invite link, sets a password, and is routed to the app their role allows.
+
+| Role | What they can access |
+|---|---|
+| **Admin** | Full access; onboards all other users |
+| **Console** | Author + Observe areas in the Console |
+| **Student** | Student app only |
+
+Email and password authentication was chosen to reduce complexity and avoid a third-party auth dependency. Because some students are minors, a full parental-consent workflow is deferred to a later milestone; only a lightweight acknowledgment is required at MVP. Role is fixed at invite time — there is no in-app role-change UI, and password reset is handled by an Admin re-invite.
+
+## Dual-Language Support
+
+The language the tutor uses to *talk* with the student is independent of the language of the *content material*. A Vietnamese student can receive explanations in Vietnamese while the SAT material and the student's own written answers stay in English — the same way a Vietnamese teacher might explain an English text in Vietnamese.
+
+- **Communication language** — set per student and per session; this is how the AI addresses the student.
+- **Content language** — a property of the lesson material itself.
+
+For language-learning subjects (e.g. IELTS writing), the tutor coaches in the communication language, but the student's produced text and all corrections remain in the target content language.
+
 ## Evolvability Comes First
 
 MVP-1 is a **validation instrument** — its job is to test whether the belief-graph engine actually works. The team should expect to be wrong about specifics and to change course based on what the data shows.
@@ -105,5 +126,7 @@ If you are deciding where to make a change — new subject, new pedagogy, new cu
 | **Knowledge model** | Belief graph — nodes, misconceptions, fragility state, evidence |
 | **Pedagogy** | Pluggable layer; Socratic and Correct/Reinforce ship in MVP-1 |
 | **Apps** | Student App (Learn) + Console (Author + Observe) |
+| **Access** | Invite-only; three roles: Admin, Console, Student |
+| **Languages** | Communication language and content language are independent |
 | **Primary NFR** | Evolvability — cheap to extend and pivot |
 | **Stack** | Vite + React / Fastify, no meta-framework |
