@@ -10,6 +10,7 @@ export const sidebar = [
         { label: 'Engine-Validation PoC: Design & Boundaries', slug: 'product/mvp-poc/poc-design' },
         { label: 'Running & Deploying the PoC', slug: 'product/mvp-poc/poc-ops' },
       ] },
+      { label: 'Student Board & App', slug: 'product/student-board' },
     ],
   },
   {

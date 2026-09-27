@@ -1,6 +1,6 @@
 ---
 title: Running & Deploying the PoC
-description: How to drive the PoC's MCP over HTTP locally, the wire-boundary bugs found while hardening it, and the full VPS deployment including hostnames, SSH-tunnel migrations, and backup-restore verification.
+description: How to drive the PoC MCP over HTTP locally, the wire-boundary bugs found while hardening it, the full VPS deployment, backup-restore verification, and the Sprint 13 migration of engine and MCP into app/.
 ---
 
 The PoC's engine is only useful if Claude can actually reach it. This page covers the practical side: how to run and exercise the MCP server yourself, the bugs the team found (and had to fix) while making its HTTP transport solid, and how the whole thing is hosted and deployed — including public hostnames, running migrations over an SSH tunnel, and proving that backups actually work.
@@ -51,7 +51,9 @@ Guarding the *input* (`JSON.stringify(result ?? null)`) only catches the "handle
 
 ## Hosting the PoC repository
 
-`engine-poc` started life with no GitHub remote at all — pushing it and wiring up VPS deployment were both planned for a later sprint. That meant its CI workflow could only be checked by running the same commands locally, in order, as a stand-in for a real pipeline — there was nowhere to push to and no way to watch an actual run. At review, the team created the private `stemolly/engine-poc` repository and pushed the existing local history as `origin`, specifically to close that gap: both CI jobs were then watched turning green on a real push, and a throwaway pull request with a deliberate lint mistake was watched turning the `Lint` job red — confirming the workflow live instead of by proxy. VPS deployment work builds on this existing repository rather than creating it fresh.
+`engine-poc` started life with no GitHub remote — pushing it and wiring up VPS deployment were both planned for a later sprint. That meant its CI workflow could only be checked by running the same commands locally as a proxy. At review, the team created the private `stemolly/engine-poc` repository and pushed the local history, specifically to close that gap: both CI jobs were watched going green on a real push, and a throwaway PR with a deliberate lint mistake was watched turning the `Lint` job red.
+
+**Sprint 13 update:** after the PoC proved the engine, the `engine-poc` repository was retired. See [Sprint 13: migration into `app/`](#sprint-13-migration-into-app) below.
 
 ## VPS deployment: the edge, Postgres, and public hostnames
 
@@ -107,3 +109,23 @@ Neither script has an application caller. Both are operator-only tools — `back
 :::tip[Why this level of rigor?]
 The evidence log is append-only by design — once written, it cannot be corrected. The student's belief history is exactly what the PoC exists to produce, and it is irreplaceable. A backup nobody has verified restored correctly is a hypothesis, not a guarantee.
 :::
+
+## Sprint 13: migration into `app/` {#sprint-13-migration-into-app}
+
+Sprint 13 (issues #117–#120) was a migration-only sprint — explicitly scoped as "no behavior change, no new product surface." Its goal was to move everything durable from `engine-poc` into the main `app/` workspace.
+
+What moved:
+
+- The `engine` module → `app/` as a first-class workspace member, code unchanged.
+- The `mcp` driving adapter → `app/` as a first-class workspace member, code unchanged.
+- The `operator-plugin` Claude plugin client → `app/`.
+
+After the move, `engine-poc` was retired:
+
+1. Its CI was removed.
+2. Its README was rewritten as a retirement notice.
+3. The GitHub repository was **archived** (read-only) once all remaining tracked work was committed and pushed.
+
+The VPS deployment (Postgres + mcp-operator + mcp-student + Caddy edge) was also rebuilt inside `app/`'s own `docker-compose.yml` and `deploy/` directory, mirroring `engine-poc`'s original mechanism with one deliberate divergence: migrations now run via a `migrator` service in the compose stack, instead of `engine-poc`'s SSH-tunnel-to-a-published-port approach. The `poc.stemolly.com` hostname-namespacing convention (from the [VPS deployment section](#vps-deployment-the-edge-postgres-and-public-hostnames) above) still applies unchanged.
+
+`docs/design/architecture/engine-core.md` and `docs/deploy/*.md` were updated to describe `app/` as the engine's real location.

@@ -1,175 +1,192 @@
 ---
 title: Cấu trúc mô-đun
-description: Cách mỗi mô-đun backend được tổ chức bên trong — cấu trúc hexagonal hai vòng, cách đặt tên contract, quy tắc barrel, các công cụ cưỡng chế, và vị trí đặt test.
+description: Cách mỗi mô-đun backend được chia thành một vòng lõi và một vòng adapter, các quy tắc chi phối mối quan hệ giữa chúng, và cách những quy tắc đó được cưỡng chế.
 ---
 
-Mọi backend module (mô-đun backend) trong codebase (toàn bộ mã nguồn) này đều theo cùng một bố cục nội bộ: một **core ring** (vòng lõi) chứa toàn bộ business logic (logic nghiệp vụ), một **adapter ring** (vòng adapter) bao quanh với các hiện thực cụ thể, và một điểm vào công khai duy nhất. Hình dạng này xuất phát từ hexagonal architecture (kiến trúc lục giác), còn gọi là ports-and-adapters (cổng và adapter), nhưng tên gọi cụ thể, đường dẫn thư mục và cơ chế cưỡng chế đều là quyết định riêng của dự án — không phải quy ước hexagonal chung. Trang này giải thích từng lớp, vì sao nó có hình dạng như vậy, và những quy tắc giúp giữ nguyên cấu trúc đó.
+Mỗi backend module (mô-đun backend) trong Stemolly đều có cùng một hình dạng nội bộ: một **core ring** (vòng lõi) được bảo vệ, chứa business logic (logic nghiệp vụ) thuần túy, và một **adapter ring** (vòng adapter) bên ngoài, chứa các hiện thực I/O cụ thể. Trang này giải thích bố cục đó, các quy tắc giữ cho nó vận hành đúng, và vì sao chúng được thiết kế như vậy.
 
 ## Bố cục hai vòng
 
-Mỗi module (`engine`, `tutor`, `llm`, `identity`, v.v.) có cấu trúc trên đĩa như sau:
+Mỗi module (ví dụ `engine`, `tutor`, `llm`, `identity`) được chia thành hai vòng.
 
 ```
 <module>/
-  core/
-    driving.ts    ← driving contract (điều bên gọi có thể yêu cầu module này làm)
-    driven.ts     ← driven contracts (điều module này cần hạ tầng cung cấp)
-    module.ts     ← orchestration — nối domain + driven contracts lại với nhau
-    domain/       ← quy tắc thuần, projection, value type; không có I/O
-  adapters/
-    pg-*.ts       ← driven adapters: repo Postgres, dịch vụ bên ngoài, v.v.
-  index.ts        ← public entry point; chỉ re-export
+├── core/           ← inner ring: pure logic, no I/O
+│   ├── driving.ts  ← driving contract (how callers invoke this module)
+│   ├── driven.ts   ← driven contracts (interfaces the module needs from infrastructure)
+│   ├── module.ts   ← orchestration: wires domain logic with driven ports
+│   └── domain/     ← pure rules and domain types
+├── adapters/       ← outer ring: concrete implementations (Postgres repos, harness bindings, etc.)
+└── index.ts        ← the only file other modules may import
 ```
 
-**Core ring** — tức mọi thứ nằm dưới `<module>/core/` — là phần bên trong của hình lục giác. Nó chứa các quy tắc domain, các interface mà module cung cấp ra ngoài (`driving.ts`), và các interface mà module *cần từ* hạ tầng (`driven.ts`). Điều quan trọng là không gì bên trong core ring được import bất cứ thứ gì từ `adapters/`. Chính quy tắc duy nhất đó tạo nên ranh giới hexagonal.
+Core ring nằm gọn trong một thư mục — `<module>/core/` — vì một lý do rất cụ thể: khả năng cưỡng chế. Khi core là một thư mục duy nhất, quy tắc "chỉ được đi vào trong" chỉ còn là một mẫu đường dẫn. Trước đây, core được mô tả như một danh sách file (`domain/`, `ports.ts`, `module.ts`), nên phải viết một quy tắc dependency-cruiser (công cụ kiểm tra đồ thị phụ thuộc) cho từng file, tự bảo trì bằng tay, và lại hỏng mỗi khi có thêm file core mới. Khi gom thành một thư mục, quy tắc đó tự động bao phủ cả những file core chưa tồn tại.
 
-**Adapter ring** chứa các hiện thực cụ thể của driven contracts: Postgres repository, file-system binding, client cho dịch vụ bên thứ ba. Adapters phụ thuộc *hướng vào trong* core (chúng hiện thực một interface được định nghĩa trong `driven.ts`); còn core thì không bao giờ vươn *ra ngoài* tới chúng.
+## Bất biến chỉ-hướng-vào-trong
+
+Quy tắc quan trọng nhất là: **không có gì trong core ring được import từ adapter ring**. Adapters được khởi tạo trong `composition.ts` rồi tiêm vào trong, chứ không bao giờ bị core kéo vào.
+
+Quy tắc này có hai nửa phải được nêu cùng nhau, vì trước đây chỉ ghi lại một nửa đã khiến nửa còn lại bị trôi đi.
+
+**Nửa 1 — core không bao giờ import adapters.** Điều này được thể hiện bằng quy tắc dependency-cruiser `core-no-adapters-import`. Trước đây, quy tắc hẹp hơn là `domain-no-adapters-import` chỉ bao phủ `domain/`; file điều phối module là `module.ts` nằm ngoài phạm vi đó và có thể tự do import adapters — đúng điều `metering` đã làm mà vẫn qua hết mọi cổng kiểm tra. Mệnh đề `from` của quy tắc sau đó được mở rộng thành `^src/(<module>)/core/`, nên giờ nó bao trùm mọi file core.
+
+**Nửa 2 — một adapter là một leaf (lá).** Một driven adapter hiện thực đúng một port, không giữ port nào khác làm dependency, và không chứa quyết định nào lẽ ra có thể viết mà không cần I/O. Việc orchestration (điều phối) qua nhiều port thuộc về `module.ts`; các business rule (quy tắc nghiệp vụ) thuộc về `domain/`. Module `identity` tuân thủ cả hai nửa và là cách hiện thực tham chiếu.
+
+:::note
+Tính đến lần kiểm tra gần nhất, module `metering` vẫn còn vi phạm Nửa 1 — nó import adapter của chính nó bên trong `module.ts`. Hãy dùng `identity` làm tham chiếu, đừng dùng `metering`.
+:::
 
 ```mermaid
 graph TD
+    EXT["Driving Caller<br/>(api module, mcp package)"]
     subgraph CORE["core/"]
-        DM["domain/"]
-        DRN["driven.ts"]
         DRG["driving.ts"]
         MOD["module.ts"]
+        DM["domain/"]
+        DRN["driven.ts"]
     end
     subgraph OUTER["adapters/"]
         A1["PgUserRepo"]
         A2["EmailAdapter"]
     end
-    EXT["Driving Caller<br/>(api module, mcp package)"]
 
     EXT -->|"calls via driving.ts"| MOD
     MOD --> DM
     MOD --> DRN
     A1 -->|"implements driven.ts"| DRN
     A2 -->|"implements driven.ts"| DRN
-    CORE -. "must NOT import" .-> OUTER
+    CORE -. "core-no-adapters-import: FORBIDDEN" .-> OUTER
 ```
 
-### Vì sao dùng một thư mục thay vì liệt kê file
+### Vì sao Nửa 2 không thể dùng dependency-cruiser
 
-Các phiên bản trước của quy tắc này xác định core như một danh sách file cụ thể (`domain/`, `ports.ts`, `module.ts`). Cách đó khiến việc cưỡng chế trở nên mong manh — cứ mỗi lần thêm file mới vào core thì lại phải cập nhật thủ công một quy tắc dependency-cruiser. Gom toàn bộ core vào một thư mục (`<module>/core/`) biến việc kiểm tra thành một mẫu đường dẫn duy nhất: bất kỳ thứ gì nằm dưới `core/` đều không được import bất kỳ thứ gì dưới `adapters/`. Nhờ đó, cả những file chưa được viết ra cũng tự động được bao phủ.
+Mọi adapter đều import cùng một file `driven.ts` một cách hoàn toàn hợp lệ — để khai báo port mà nó hiện thực. Vì vậy, trường hợp vi phạm (giữ *hai* port) và trường hợp đúng (giữ một port) trông giống hệt nhau dưới góc nhìn của một công cụ đồ thị import ở mức file. Dependency-cruiser không thể phân biệt hai trường hợp đó.
 
-### Cách đặt tên: driving.ts và driven.ts
+Cách khắc phục là dùng quy tắc ESLint `no-restricted-syntax` (G-21), áp dụng cho `server/src/*/adapters/**/*.ts`. Quy tắc này đánh dấu mọi class property, constructor parameter, hoặc trường trong deps-interface có tên kiểu kết thúc bằng `Port`, `Repository`, hoặc `Store`. Một adapter vẫn có thể *implement* một port interface — đó là node `TSClassImplements` và không bị đụng tới.
 
-Trước đây các file contract (hợp đồng giao diện) được gọi là `api.ts` và `ports.ts`. Cả hai tên này đều không thể hiện hướng. `api` còn bị trùng với tên của module `api` ở cấp cao nhất. `ports.ts` thì gợi cảm giác là "toàn bộ các port", nhưng thực ra chỉ chứa nửa outbound.
+Vì vậy, quy ước đặt tên với hậu tố `Port` / `Repository` / `Store` là thứ **gánh tải thực sự**. Một kiểu port được đặt tên ngoài các hậu tố đó sẽ vô hình với G-21. Đây là một điểm mù đã được nêu rõ, không phải sơ suất.
 
-Tên mới dùng lại đúng bộ từ vựng mà các quy tắc và ADR đã dùng — "driving surface" và "driven ports" — nên cả codebase chỉ còn một cặp từ thống nhất. Cái giá thực tế là `driving.ts` và `driven.ts` chỉ khác nhau ba ký tự nên dễ bị nhìn nhầm. Nhưng cái giá đó có giới hạn: một quy tắc dependency-cruiser cấm hai file này import lẫn nhau, nên nếu chọn nhầm thì CI sẽ báo lỗi ngay.
+### Một sắc thái cần lưu ý: domain/ được phép import driven.ts
 
-### domain/ có thể tự do import driven.ts
+`core/domain/` được phép tự do import `core/driven.ts`. Điều này đôi khi khiến những người quen với biến thể chặt hơn của hexagonal architecture (kiến trúc lục giác), gọi là "functional core / imperative shell", thấy bất ngờ, vì trong biến thể đó code domain hoàn toàn không được đụng tới port interface. Nhưng đó là một lựa chọn khác, chặt hơn, mà Stemolly chủ ý không áp dụng. Trong ports-and-adapters (cổng và adapter) theo nghĩa chuẩn, port interface định nghĩa những gì core cần — chúng nằm *bên trong* hình lục giác, không phải ở bên ngoài.
 
-Một cách hiểu sai thường gặp về hexagonal architecture là `domain/` không được import bất cứ thứ gì bên ngoài chính nó, kể cả các port interface trong `driven.ts`. Dự án này không chọn cách đó. Driven contracts nằm *bên trong* hình lục giác — chúng là một phần của core ring — nên `domain/` được phép import `core/driven.ts`. Thứ mà `domain/` tuyệt đối không được import là `adapters/`.
+Hệ quả thực tế là các kiểu record dùng chung được khai báo một lần trong `domain/` rồi được `driven.ts` import ra ngoài. Nếu lặp lại cùng một kiểu ở cả hai file, bạn sẽ tạo ra một đường nối chỉ type-check (kiểm tra kiểu) được do ngẫu nhiên, mà không có gì phát hiện độ lệch khi một phía thay đổi.
 
-Cấm `domain/ → driven.ts` là phong cách functional core / imperative shell (lõi hàm / vỏ mệnh lệnh) nghiêm ngặt hơn. Đó là một lựa chọn hợp lệ, nhưng không phải lựa chọn ở đây.
+## Tên file contract: driving.ts và driven.ts
 
-## Quy tắc leaf-adapter
+Hai file contract được đặt tên là `core/driving.ts` và `core/driven.ts`. Chúng thay thế cho `api.ts` và `ports.ts`.
 
-Việc tách core/adapters quyết định code nằm ở đâu. Một quy tắc thứ hai quyết định adapter *là gì*:
+- `ports.ts` gợi cảm giác là "toàn bộ các port" nhưng thực ra chỉ chứa nửa đi ra ngoài.
+- `api.ts` bị trùng với chính tên của module `api`.
+- `inbound.ts` / `outbound.ts` đã được cân nhắc rồi loại bỏ — bộ ADR và tập quy tắc hiện đã dùng nhất quán "driving surface" và "driven ports", nên thêm một cặp từ khác chỉ khiến một khái niệm có tới hai bộ từ vựng.
 
-> Một driven adapter hiện thực **chính xác một** driven contract, không giữ bất kỳ port nào khác làm dependency, và không chứa quyết định nào đáng ra có thể viết mà không cần I/O.
+Cái giá đã biết là `driving.ts` và `driven.ts` chỉ khác nhau ba ký tự nên rất dễ đọc nhầm. Nhưng cái giá đó có giới hạn: một quy tắc dependency-cruiser cấm hai file này import lẫn nhau, nên nếu lấy nhầm file thì CI sẽ hỏng ngay.
 
-Hãy xem adapter như một lớp chuyển dịch mỏng — nó nói ngôn ngữ của một hệ thống bên ngoài (SQL, HTTP, đường dẫn file) và không hơn thế. Orchestration (điều phối) — quyết định *gọi adapter nào* và theo thứ tự nào — thuộc về `module.ts`. Các quy tắc domain thuộc về `domain/`. Một adapter bắt đầu tích lũy logic là adapter đã nhận thêm một vai trò vốn phải nằm ở nơi khác.
+Việc tách driving contract và driven contracts thành hai file riêng còn phục vụ cho cưỡng chế. Quy tắc "hai thứ này không được phản chiếu lẫn nhau" được biến thành "hai file này không được import lẫn nhau" — đúng kiểu quy tắc mà công cụ dựa trên đường dẫn có thể diễn đạt dưới dạng một cặp đường dẫn bị cấm theo hai chiều.
 
-Quy tắc này được ghi lại cùng với quy tắc cấm core import adapters là có lý do: chỉ ghi lại quy tắc thứ nhất chính là cách đã khiến quy tắc thứ hai bị trôi đi. Module `identity` tuân thủ cả hai và là implementation (cách hiện thực) tham chiếu. `metering` từng vi phạm mệnh đề thứ nhất — import adapter của chính nó vào core — cho tới khi được sửa.
+## Driven adapters luôn là outbound
 
-### Vì sao adapter ring chỉ chứa driven adapters
+Thư mục `<module>/adapters/` chỉ chứa **driven (outbound) adapters** — repository Postgres, email dạng file, binding cho LLM harness. Phía driving (inbound) không bao giờ được đặt ở đây. Nó nằm ở Fastify routes của module `api` cho ứng dụng, hoặc ở package workspace `mcp/` cho bản proof-of-concept của engine.
 
-Thư mục `adapters/` chỉ chứa driven adapters (adapter outbound). Không có driving adapters (adapter inbound) nào nằm bên trong một module. Phía driving nằm hoàn toàn bên ngoài module: các route Fastify của module `api` cho ứng dụng, hoặc package `mcp/` trong workspace cho engine PoC.
+Điều này nhất quán ở mọi module đã có nội dung thật (`identity`, `metering`, `llm`, `engine`) và đã đúng từ module đầu tiên. Chỉ là mãi gần đây nó mới được viết ra. Cái giá của việc để điều này không thành văn là: một người hiểu hexagonal architecture mở một module, thấy một thư mục tên `adapters/`, sẽ kỳ vọng cả hai phía đều ở đó; khi chỉ thấy repository, họ kết luận là còn thiếu gì đó. Thực ra thư mục ấy không thiếu gì cả. Sự bất đối xứng đó là cấu trúc. Không có kiểm tra CI nào cho điều này — không gì có thể tự động phân biệt driving adapter với driven adapter — nên nó vẫn phải được giữ bằng review.
 
-Điều này đúng ở cả bốn module đã có nội dung thực và đã đúng ngay từ module đầu tiên, nhưng mãi gần đây mới được viết thành tài liệu. Cái giá của việc không nói rõ là: một người quen với hexagonal architecture mở `adapters/`, chỉ thấy repository, rồi kết luận bố cục còn thiếu. Thực ra không thiếu — sự bất đối xứng đó là cấu trúc cố hữu và nhất quán. Nó xuất phát từ topology (cấu trúc tổng thể) của monolith: phía driving luôn là một module khác hoặc một package khác, chứ không bao giờ là một thư mục lồng bên trong module đang được điều khiển.
+## Quy tắc barrel cho index.ts
 
-## Cưỡng chế: dependency-cruiser và ESLint
+`index.ts` của mọi module phải chỉ chứa **các câu lệnh re-export**. Không được định nghĩa schema, class, interface có logic, hay factory function ngay trong đó. Mọi phần hiện thực phải nằm ở các file `.ts` đồng cấp riêng; `index.ts` chỉ việc re-export chúng.
 
-Hai công cụ riêng biệt được dùng để cưỡng chế hai invariant (bất biến) riêng biệt, vì không công cụ nào kiểm tra được phần việc của công cụ kia.
-
-### dependency-cruiser (quy tắc ở mức file)
-
-`app/.dependency-cruiser.cjs` là kiến trúc ở dạng máy đọc được của dự án này. Theo đúng định nghĩa, một PR thay đổi một cạnh phụ thuộc được phép chính là một thay đổi kiến trúc và phải viện dẫn ADR tương ứng.
-
-Config này mã hóa bốn nhóm quy tắc:
-
-| Quy tắc | Nội dung kiểm tra |
-|---|---|
-| `engine-no-upward-deps` | Lõi domain không import gì từ orchestration hoặc các module biên |
-| `declared-edges-only` | Mọi import liên mô-đun chưa khai báo đều là lỗi |
-| `no-deep-cross-module-imports` | Chỉ được chạm tới một module thông qua `index.ts` của nó |
-| `core-no-adapters-import` | Không gì dưới `<module>/core/` được import `<module>/adapters/` |
-
-Trong CI, nó chạy dưới tên `depcruise:check`. Config này chỉ có ý nghĩa nếu nó thực sự báo lỗi khi có vi phạm — cổng CI đã được xác minh bằng cách cố ý cấy một import bị cấm và xác nhận build chuyển sang màu đỏ.
-
-#### Những gì dependency-cruiser không kiểm tra được
-
-`dependency-cruiser` suy luận ở mức file: nó chỉ thấy file A import file B, không hơn. Quy tắc leaf-adapter — "adapter này chỉ giữ đúng một port" — lại là một quy tắc ở mức symbol granularity (độ hạt theo ký hiệu). Mọi adapter đều import cùng một file `driven.ts` một cách hợp lệ, bất kể chúng đang giữ bao nhiêu port làm dependency. Một lần chạy `depcruise` sạch không thể phân biệt một leaf adapter với một adapter đang âm thầm giữ ba port. Trong ba issue liên tiếp, một lần chạy `depcruise` sạch đã bị hiểu thành bằng chứng ranh giới vẫn khỏe mạnh, dù trên thực tế nó không bao giờ có thể phát hiện lỗi đó.
-
-Có một kỹ thuật có thể đẩy một mối quan tâm ở mức symbol xuống mức file: đặt hai phía vào hai file riêng. Khi `driving.ts` và `driven.ts` là hai file tách biệt, câu "hai contract này không được phản chiếu lẫn nhau" sẽ trở thành "hai file này không được import lẫn nhau" — một quy tắc mà công cụ dựa trên đường dẫn có thể diễn đạt. Quy tắc import qua lại này được triển khai bằng hai mục `from`/`to` (mỗi chiều một mục), vì một mục đơn chỉ kiểm tra được một chiều.
-
-### Quy tắc ESLint AST G-21 (cưỡng chế leaf-adapter)
-
-Vì dependency-cruiser không diễn đạt được quy tắc leaf-adapter, quy tắc này được cưỡng chế bằng một quy tắc ESLint `no-restricted-syntax` (G-21) áp dụng cho `server/src/*/adapters/**/*.ts`. Quy tắc này đánh dấu mọi class property, constructor parameter property, hoặc trường trong deps-interface có tên kiểu kết thúc bằng `Port`, `Repository`, hoặc `Store`. Việc hiện thực một port là một node `TSClassImplements` nên không bị chạm tới — adapter vẫn có thể khai báo interface mà nó đáp ứng; nó chỉ không được *giữ* một port làm dependency.
-
-G-21 có một điểm mù đã được nêu rõ: nó dựa vào quy ước hậu tố đặt tên. Một kiểu port được đặt tên ngoài ba hậu tố đó sẽ vô hình với nó. Vì vậy, quy ước đặt tên ở đây là thứ gánh tải, không chỉ là chuyện hình thức.
-
-## Các bẫy của ESLint Flat Config
-
-Dự án dùng ESLint flat config (cấu hình phẳng của ESLint) qua `eslint.config.js`. Trong quá trình phát triển đã có hai lỗi liên quan tác động tới các block `no-restricted-syntax`, và bạn nên biết về chúng.
-
-### Tùy chọn cũ âm thầm quay lại khi override chỉ đổi severity
-
-Khi một block config phía sau đặt một rule thành giá trị không chứa option nào — ví dụ `['error']` hoặc `['error', ...[]]` khi phần spread rỗng — cơ chế merge của config-array trong ESLint *không xóa* các option của block trước. Nó giữ lại các option cũ và chỉ thay severity. Block phía sau trông có vẻ đã override rule, nhưng thực ra lại âm thầm nhận lại các selector từ block trước.
-
-Điều này từng xảy ra ở `engine-poc/mcp/eslint.config.js` khi một override tính giá trị `no-restricted-syntax` của nó bằng cách lấy danh sách gốc trừ đi một selector; đúng lúc đó danh sách còn lại rỗng, nên biểu thức co về dạng chỉ còn severity và vô tình nhận lại chính selector mà nó đang muốn bỏ.
-
-**Cách sửa:** loại file đó khỏi block trước bằng `ignores: ['path/to/file.ts']` thay vì trông đợi một block phía sau override nó. Như vậy sẽ không có lần merge chéo block nào diễn ra nữa.
-
-### ignores loại trừ khỏi cả block, không chỉ một selector
-
-Cách sửa ở trên cũng có cái giá riêng. Trong ESLint flat config, `ignores` hoạt động ở cấp block: nó loại các file khớp khỏi *mọi* rule mà block đó đặt ra, chứ không chỉ khỏi một selector trong một rule tổng hợp. Nếu một block dùng chung gộp nhiều selector `no-restricted-syntax` với nhau, việc thêm một file vào `ignores` của block đó để miễn cho nó khỏi một selector sẽ âm thầm miễn luôn khỏi tất cả selector còn lại.
-
-Điều này từng xảy ra trong `app/eslint.config.js`: một mục `ignores` được thêm vào vì một selector, rồi về sau lại âm thầm làm rơi mất selector thứ hai được thêm vào cùng block đó — và lỗi này đã lọt qua hai vòng review.
-
-**Cách sửa:** đừng bao giờ nới rộng `ignores` của một block dùng chung chỉ để miễn trừ cho một selector. Thay vào đó, giữ nguyên `ignores` của block dùng chung và thêm một block riêng ở cuối cho các file cần được xử lý khác đi, rồi khai báo lại những selector nào vẫn phải tiếp tục áp dụng ở đó.
-
-## `index.ts` chỉ dùng làm barrel
-
-`index.ts` của mọi module chỉ được chứa các lệnh re-export — không được định nghĩa schema, class, interface hay factory function trực tiếp trong đó. Mọi implementation phải nằm trong các file đồng cấp riêng, rồi để `index.ts` re-export lại. Quy tắc này được phát hiện như một khoảng trống ở buổi review Sprint 1, khi nhiều module (`contracts`, `errors`, `logger`, `persistence`, `metering`, `llm`, và các module khác) bị phát hiện đang định nghĩa logic thực sự trực tiếp trong `index.ts`.
+Quyết định này được đưa ra sau khi một buổi review Sprint 1 phát hiện nhiều module (`contracts`, `errors`, `logger`, `persistence`, `metering`, `llm`, `api`) đang đặt logic thật trực tiếp trong `index.ts`. Quy tắc này được cưỡng chế bằng một CI fitness function.
 
 ```ts
-// ✅ correct — index.ts is a barrel
+// ✅ correct — index.ts is a re-export barrel
 export { createLlmGateway } from './gateway';
 export type { LlmPort } from './core/driven';
 
 // ❌ wrong — logic defined inline in index.ts
-export function createLlmGateway(deps: Deps) { … }
+export function createLlmGateway(deps: Deps) { /* ... */ }
 ```
 
-Quy tắc này được áp dụng nghiêm ngặt: kể cả module factory function cũng nằm trong phạm vi. Ngoại lệ gồm entry point của tiến trình `server/src/index.ts` và các stub barrel rỗng làm placeholder. Quy tắc được cưỡng chế bằng một CI fitness function.
+Có hai ngoại lệ:
+- Entry point của tiến trình là `server/src/index.ts`.
+- Các stub barrel rỗng trong những module mà code thật sẽ được bổ sung ở sprint sau — chúng giữ chỗ đã dành trước và được miễn trong khi các stub đó vẫn còn là lời hứa chính xác.
 
-## Composition Root: Wiring factory tường minh
+## Cưỡng chế: dependency-cruiser như bản ghi kiến trúc
 
-Khi khởi động, public factory (hàm khởi tạo công khai) của từng module — ví dụ `createLlmGateway(deps)`, `createMeteringModule(deps)` — được nối với nhau thủ công trong một composition root (điểm ghép nối trung tâm) duy nhất là `server/src/composition.ts`. Dự án không dùng DI container (bộ chứa tiêm phụ thuộc) với cơ chế auto-wiring dựa trên decorator hoặc reflection.
+`app/.dependency-cruiser.cjs` là bản kiến trúc máy-đọc-được của dự án. Nếu thay đổi một cạnh được phép trong file đó thì theo đúng định nghĩa, đó là thay đổi kiến trúc và phải viện dẫn một ADR.
 
-Lý do cũng là nguyên tắc "tường minh hơn là ma thuật" đã dẫn dắt nhiều quyết định khác trong codebase này: một container che giấu đồ thị phụ thuộc đúng ở nơi mà kỷ luật ranh giới của modular monolith cần nó phải hiện ra rõ nhất. Khi đọc `composition.ts`, bạn thấy toàn bộ wiring ở một chỗ. Còn khi auto-wiring lắp ráp mọi thứ một cách vô hình, việc vi phạm ranh giới sẽ không để lại hậu quả nhìn thấy được cho tới khi có thứ hỏng ở runtime.
+Config này mã hóa:
 
-## Vị trí đặt test
+| Rule | Nội dung kiểm tra |
+|---|---|
+| `engine-no-upward-deps` (R-1) | Lõi domain không import gì từ orchestration hay các module biên |
+| `declared-edges-only` | Mọi import xuyên mô-đun chưa được khai báo đều là lỗi |
+| `no-deep-cross-module-imports` (R-3) | Chỉ được đi vào một module qua `index.ts` của nó |
+| `core-no-adapters-import` | Không gì bên dưới `<module>/core/` được import từ `<module>/adapters/` |
 
-Ranh giới core/adapters cũng áp dụng cho file test. Một kiểm tra dựa trên đường dẫn không thể phân biệt file test với file source, và cũng không nên phân biệt — vì ngoại lệ đó sẽ trở thành chính lỗ thủng trong ranh giới.
+Config này chạy trong CI qua `depcruise:check`. Trường hợp phủ định — CI chuyển đỏ khi cố tình tạo một vi phạm — chính là bằng chứng cho thấy từng cổng kiểm tra thật sự có lực cắn.
 
-Một integration test (kiểm thử tích hợp) tạo ra các đối tượng adapter thật (ví dụ một `PgUserRepository` chạy với cơ sở dữ liệu thật) không thể nằm trong `core/` — vì nó sẽ import từ `adapters/`, và như vậy sẽ vi phạm quy tắc `core-no-adapters-import`. Vì thế, unit test và integration test của cùng một đối tượng sẽ tách ra:
+### Những gì dependency-cruiser không kiểm tra được
 
-- `core/module.test.ts` — sống cùng file mà nó kiểm thử, bên trong core ring
-- `module.integration.test.ts` — nằm ngoài core ring, cùng cấp với `adapters/`
+Dependency-cruiser suy luận ở độ hạt cấp file. Quy tắc leaf-adapter (Nửa 2 ở trên) lại là quy tắc ở độ hạt cấp symbol (ký hiệu): mọi adapter đều import cùng một `driven.ts`, bất kể nó đang giữ bao nhiêu port. Trong ba issue liên tiếp, một lần chạy `depcruise` sạch đã bị đọc như bằng chứng rằng ranh giới mô-đun vẫn khỏe mạnh, trong khi thật ra nó không bao giờ có khả năng phát hiện ra lỗi đó.
 
-Vitest vốn đã tách hai hậu tố này thành các lượt chạy khác nhau, nên cách chia này đi theo một đường ranh sẵn có, chứ không tạo ra một đường ranh mới.
+Có một kỹ thuật có thể biến một quy tắc ở độ hạt symbol thành quy tắc ở độ hạt file: đặt hai phía vào hai file riêng. Một khi `driving.ts` và `driven.ts` đã là hai file tách biệt, câu "hai contract này không được phản chiếu lẫn nhau" trở thành "hai file này không được import lẫn nhau" — một quy tắc mà công cụ dựa trên đường dẫn có thể cưỡng chế. Quy tắc import lẫn nhau này được triển khai thành hai mục `from`/`to`, mỗi chiều một mục, vì một mục đơn chỉ kiểm tra được một chiều.
 
-## Ngoại lệ của module persistence
+## Trường hợp đặc biệt: mô-đun adapter thuần
 
-Module `persistence` là một pure adapter module (mô-đun adapter thuần), không có phân lớp hexagonal bên trong. Phần scaffold `domain/`, `ports.ts` và `adapters/` của nó đã bị xóa, chỉ để lại `pool.ts` và một `index.ts` để re-export.
+Một số module hoàn toàn không có phân lớp hexagonal bên trong. `domain/`, `ports.ts`, và `adapters/index.ts` của module `persistence` đã bị xóa, chỉ còn lại `pool.ts` và một `index.ts` chỉ để re-export. Sứ mệnh của module này là dựng một database connection pool rồi chuyển nó cho các module khác — không có domain logic nào cần bảo vệ.
 
-Lập luận mang tính quyết định là: công việc duy nhất của module này là tạo một `pg.Pool` và chuyển nó cho các module khác. Không ai có thể chỉ ra công việc tương lai nào sẽ làm đầy `persistence/domain/`. Một stub comment kiểu *"intentionally empty until a later issue adds real business rules"* chỉ là một lời hứa sai — nó bảo mọi người đọc về sau chờ một thứ vốn sẽ không bao giờ đến.
+Lập luận mang tính quyết định là không ai có thể gọi tên phần việc tương lai nào sẽ lấp đầy `persistence/domain/`. Một dòng chú thích stub kiểu *"intentionally empty until a later issue adds real business rules"* là một lời hứa sai, khiến mọi người đọc đều chờ một thứ vốn sẽ không bao giờ tới.
 
-Điều này rõ ràng **không** phải tiền lệ để xóa stub ở những nơi khác. Vẫn còn khoảng ba mươi file placeholder trên các module khác (`engine`, `tutor`, `pedagogy`, v.v.), nơi business logic tương ứng thực sự sẽ xuất hiện ở một sprint sau — những stub đó vẫn được giữ lại. Việc xóa ở `persistence` là một cánh cửa hai chiều: nếu sau này thật sự xuất hiện một port đúng nghĩa, thư mục đó có thể quay lại chỉ trong một commit.
+Các module `api` và `jobs` cũng được miễn trừ một cách tường minh khỏi yêu cầu phải có thư mục `domain/` — sứ mệnh của chúng là "không có domain logic."
 
-:::note
-`persistence` cùng với `api` và `jobs` nằm trong ngoại lệ đã được tài liệu hóa về việc không cần có thư mục `domain/`. Mệnh đề "barrel rỗng được miễn R-24" trong quy tắc `index.ts` chỉ dùng làm barrel vẫn còn hiệu lực và vẫn cần thiết cho 27 placeholder stub còn lại ở các module khác.
+:::caution
+Đây **không** phải tiền lệ để xóa stub ở nơi khác. Vẫn còn khoảng ba mươi file placeholder trải trên mười module khác (`engine`, `content`, `pedagogy`, `tutor`, `judge`, …). Với các module đó, các stub là lời hứa thật: code thật của chúng sẽ xuất hiện ở các sprint sau.
 :::
+
+## Integration test nằm ở đâu
+
+Quy tắc chỉ-hướng-vào-trong áp dụng cho mọi file bên dưới `core/` — kể cả file test. Kiểm tra dựa trên đường dẫn không thể miễn trừ cho test, và cũng không nên miễn trừ; chính ngoại lệ đó sẽ trở thành lỗ thủng.
+
+Một integration test (kiểm thử tích hợp) nối các `Pg*Repository` thật vào một cơ sở dữ liệu thật thì không thể đặt bên trong `core/`. Nó sẽ import từ `adapters/`, và như vậy là vi phạm quy tắc một cách hoàn toàn chính xác.
+
+Unit test và integration test của cùng một đối tượng vì thế phải tách đường:
+
+- `core/module.test.ts` — ở cạnh `module.ts`, bên trong `core/`
+- `module.integration.test.ts` — nằm ngoài `core/`, cùng cấp với thư mục `adapters/`
+
+Cấu hình Vitest của dự án vốn đã tách hai hậu tố này thành hai lượt chạy test khác nhau, nên cách chia này đi theo một đường nối đã có sẵn.
+
+## Những bẫy của ESLint flat config
+
+Các quy tắc `no-restricted-syntax` dùng để cưỡng chế G-21 và các quy tắc khác được viết trong ESLint flat config. Có hai cái bẫy không hiển nhiên, và mỗi cái đều từng gây ra lỗi thật.
+
+### Kế thừa option một cách âm thầm khi override chỉ đổi severity
+
+Khi một block config về sau đặt một rule về dạng chỉ còn severity — ví dụ `['error']`, hoặc `['error', ...someEmptyArray]` — bộ gộp config-array vẫn giữ lại option của block trước thay vì xóa đi. Chỉ severity là bị thay. Một block về sau chỉ thật sự thay hẳn block trước nếu chính nó cũng mang theo option riêng.
+
+Điều này từng khiến một override trong `engine-poc/mcp/eslint.config.js` âm thầm kế thừa lại selector mà nó đang cố tắt, làm cho override mất tác dụng hoàn toàn. Cách sửa an toàn là loại file đó khỏi block trước bằng `ignores`, thay vì trông cậy vào một block về sau sẽ xóa rule.
+
+### ignores miễn trừ cả block, không chỉ một selector
+
+`ignores` hoạt động ở cấp block. Thêm một file vào `ignores` của một block nghĩa là loại nó khỏi mọi selector nằm trong giá trị rule tổng hợp của block đó — không chỉ khỏi selector mà bạn định miễn.
+
+Chính điều này đã gây rắc rối ba lần trong cùng một issue. Việc thêm `**/*.test.ts` vào một mục `ignores` chỉ để miễn test file khỏi một selector mới đã âm thầm làm rơi luôn các selector có sẵn khỏi những test file đó. Trường hợp thứ ba còn lọt qua cả hai vòng review và chỉ bị phát hiện ở vòng review ngoài.
+
+**Cách sửa:** đừng bao giờ nới `ignores` của một block dùng chung chỉ để xử lý ngoại lệ cho một selector. Thay vào đó, hãy thêm một block riêng ở cuối, chỉ áp dụng cho những file cần cách đối xử khác, rồi viết lại tường minh các selector vẫn phải tiếp tục áp dụng ở đó.
+
+## Đặt tên port: theo năng lực, không theo cơ chế
+
+Hình dạng của một driven port phải diễn đạt được **điều core cần từ hạ tầng**, chứ không phải cách một nhà cung cấp cụ thể phơi bày nó. Có hai hướng sai thường gặp.
+
+**Phản chiếu driving surface** sẽ biến một bước điều phối thành một phương thức repository — port bị nặn theo API của bên gọi thay vì theo năng lực của hạ tầng.
+
+**Phản chiếu cơ chế của nhà cung cấp** sẽ khóa port vào một hiện thực duy nhất mà vẫn mang dáng vẻ trừu tượng. Ví dụ điển hình là blob storage: một phương thức port tên `presign(key)` sao chép thẳng thuật ngữ của S3. Một adapter cho filesystem không thể hiện thực nó một cách trung thực. Nhưng một phương thức tên `urlFor(key, ttlSeconds)` — "một URL mà client có thể tải đối tượng này trong một khoảng thời gian hữu hạn" — thì adapter nào cũng có thể đáp ứng: adapter object store bằng cách presign, adapter cục bộ bằng cách trả về proxy route của chính ứng dụng.
+
+Lợi ích thu được là cơ chế trở thành một lựa chọn cục bộ và đến muộn. Kiểu rò rỉ này — một phương thức port mà ngữ nghĩa của nó chỉ có đúng một nhà cung cấp đáp ứng được — là thứ dependency-cruiser không thể nhìn ra. Nó vẫn phải được giữ bằng review.
+
+## Wiring lúc khởi động: factory tường minh, không dùng DI container
+
+Các module phơi ra public factory function (ví dụ `createLlmGateway(deps)`, `createMeteringModule(deps)`). Composition root của server gọi tay các hàm này để nối toàn bộ hệ thống lại với nhau. Không có dependency-injection container.
+
+Điều này nhất quán với nguyên tắc "tường minh hơn ma thuật" của dự án: cơ chế auto-wiring của một DI container che khuất đồ thị phụ thuộc đúng ở nơi mà kỷ luật ranh giới của modular monolith cần nó phải hiện ra rõ nhất.
+
+Một quy ước đặt tên liên quan nữa: các mã định danh quản trị như `ADR-021` hay `R-14` chỉ thuộc về docblock trong code, không bao giờ nên xuất hiện trong runtime error message hoặc log line. Những chuỗi đó được đọc bởi operator và agent, những người không nắm bộ tài liệu thiết kế, và các mã định danh ấy sẽ âm thầm mục ruỗng khi quyết định bị thay thế.

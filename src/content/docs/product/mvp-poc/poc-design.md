@@ -1,24 +1,24 @@
 ---
 title: "Engine-Validation PoC: Design & Boundaries"
-description: Why Stemolly runs a small proof-of-concept before the app, how Claude plays both tutor roles inside it, and the rules that keep its data trustworthy and migratable.
+description: Why Stemolly runs a small proof-of-concept before the app, how Claude plays both tutor roles inside it, the rules that keep its data trustworthy and migratable, and the boundary where the engine is absorbing PoC application concerns.
 ---
 
-Before building the MVP-1 app, Stemolly is running an **Engine-Validation PoC**: one real student gets help with assignments (math first, then physics), and the whole conversational side is played by Claude — no Student app, no login, no Console. Every design choice inside the PoC follows from one goal: prove the belief-graph engine works, as cheaply as possible, without risking the student's data.
+Before building the MVP-1 app, Stemolly runs an **Engine-Validation PoC**: one real student gets help with assignments (math first, then physics) and the whole conversational side is played by Claude — no Student app, no login, no Console. Every design choice inside the PoC follows from one goal: prove the belief-graph engine works, as cheaply as possible, without risking the student's data.
 
 ## Why the PoC runs before the app
 
-The only part of MVP-1 that really matters to prove is the engine — the part that turns a student's answers into a picture of what they understand and misunderstand. Building the full Student app, login system, and Console before knowing whether the engine produces trustworthy signals would be an expensive way to find out it doesn't.
+The only part of MVP-1 that really matters to prove is the engine — the part that turns a student's answers into a picture of what they understand and misunderstand. Building the full Student app, login system, and Console before knowing whether the engine produces trustworthy signals would be an expensive way to find that out.
 
-So the PoC replaces the whole front end with Claude. Claude reads the student's assignment materials directly, coaches them through it, and talks to the engine over an **MCP** — a protocol that lets an AI call a defined set of tools against a service, the same way a person calls a defined set of functions in an API. The PoC is deliberately named a PoC, not "MVP-0", to keep one fact visible at all times: **the shell around the engine is disposable, but the engine's data is not.** The original plan to build the Student app and Console is only postponed behind the PoC, not cancelled.
+So the PoC replaces the whole front end with Claude. Claude reads the student's assignment materials directly, coaches them through problems, and talks to the engine over an **MCP** — a protocol that lets an AI call a defined set of tools against a service, similar to a function API. The PoC is deliberately named a PoC, not "MVP-0", to keep one fact visible: **the shell around the engine is disposable, but the engine's data is not.** The original plan to build the Student app and Console is postponed behind the PoC, not cancelled.
 
 ## Two AI roles, one synchronous loop
 
-Inside the PoC, Claude plays both tutoring roles that the real product design calls for:
+Inside the PoC, Claude plays both tutoring roles the real product calls for:
 
-- The **Guide** runs the conversation turn by turn — talking with the student and reading their materials (Claude reads PDFs and images directly; converting them to text first would only lose information).
-- The **Analyst** fires at checkpoints, as a separate Claude subagent. It reasons over what just happened and writes evidence back to the engine.
+- The **Guide** runs the conversation turn by turn — talking with the student and reading their materials. Claude reads PDFs and images natively; converting them to text first would only lose information.
+- The **Analyst** fires at checkpoints as a separate Claude subagent. It reasons over what just happened and writes evidence back to the engine.
 
-Because there is only one student, the Analyst does not need to run in the background — it runs **synchronously**, right in the middle of the conversation:
+Because there is only one student, the Analyst runs **synchronously**, right in the middle of the conversation:
 
 ```mermaid
 sequenceDiagram
@@ -29,21 +29,21 @@ sequenceDiagram
 
     St->>G: submits work at a checkpoint
     G->>An: hands off the interaction
-    An->>E: "append_evidence(checkpoint batch)"
-    E-->>An: "Report, belief state folded from the log"
-    An-->>G: diagnosis
+    An->>E: "append_evidence batch"
+    E-->>An: belief state folded from log
+    An-->>G: diagnosis and report
     G-->>St: continues tutoring
 ```
 
-The full app will need an asynchronous job runner for this Analyst step, plus a fallback for when it lags — because many students will be doing this at once. The PoC drops all of that; it is only reintroduced once real concurrency (many students at once) actually shows up. What the PoC does keep is the real shape of the two-agent design — Guide converses, Analyst diagnoses — just with Claude filling in for the in-house tutoring engine that the app will eventually run instead.
+The full app will need an asynchronous job runner for the Analyst step, plus a fallback for when it lags — because many students will be doing this at once. The PoC drops all of that and reintroduces it only when real concurrency arrives. What the PoC preserves is the real shape of the two-agent design: Guide converses, Analyst diagnoses.
 
 ### How the skills are developed
 
-The Guide session skill, the Analyst checkpoint subagent, the seed skill, and the assignment-ingestion skill are all improved by trial across real sessions — not built once to a definition of done. They are iterated continuously, by hand, gated on nothing, and belong to no planned sprint.
+The Guide skill, the Analyst checkpoint subagent, the seed skill, and the assignment-ingestion skill are improved by trial across real sessions — not built once to a definition of done. They are iterated continuously, by hand, gated on nothing, and belong to no planned sprint.
 
-The team rejected treating them as sprint deliverables: a tutoring prompt is only judged by how sessions actually go, and you cannot assess that before the sessions exist. What planned work *does* owe the skills is the **engine surface they call** — the anchor store, the concept-gap channel, the identifier handoff, and the evidence trail. Those are the things a skill invokes but cannot supply for itself, and that reframing is what turns skill-centered sprint scope into engine-surface sprint scope.
+Treating them as sprint deliverables was rejected: a tutoring prompt is only judged by how sessions go, and you cannot assess that before sessions exist. What planned work *does* owe the skills is the **engine surface they call** — the anchor store, the concept-gap channel, the evidence trail. Those are things a skill invokes but cannot supply for itself.
 
-The practical consequence: skill quality is never a gate on shipping engine work, and engine work is never blocked waiting for a prompt to be finished.
+**Practical consequence:** skill quality is never a gate on shipping engine work, and engine work is never blocked waiting for a prompt to be finished.
 
 ## Rules the engine enforces on the AI
 
@@ -59,26 +59,29 @@ The tool list itself is kept deliberately short: an engine operation only gets a
 
 ## Built on the real schema, so it migrates for free
 
-Losing a student's history when they move from the PoC into the real app is not acceptable — that's a hard requirement. So the PoC does not use a throwaway data store. It builds the **real** engine module, on its real database schema (concept nodes and edges, an append-only evidence log, and belief state computed from that log), inside the same monorepo the app will eventually use.
+Losing a student's history when she moves from the PoC into the real app is a hard requirement. So the PoC builds the **real** engine module on its real database schema — concept nodes and edges, an append-only evidence log, and belief state computed from that log. Migration is then a `pg_dump` data copy, not a rewrite.
 
-That makes migration a plain data copy (`pg_dump`) rather than a rewrite. It also means the code, not just the data, carries over: the MCP is a thin adapter that sits over the engine's existing interface — the same slot the app's own API layer will occupy later. When the app is built, the engine code doesn't change; only the adapter in front of it swaps out.
+Code migrates too. The MCP is a thin adapter over the engine's interface — the same interface slot the app's API layer will occupy. When the app is built, the engine code does not change. **Sprint 13 carried this through:** the `engine` module and `mcp` driving adapter moved wholesale from `engine-poc` into `app/` as first-class workspace members, without changing the engine's code or its MCP surface. The `engine-poc` repo was then archived. See [Running & Deploying the PoC](./poc-ops/) for the migration story.
 
 ```mermaid
 flowchart LR
-    subgraph poc["PoC, now"]
-        GA["Guide / Analyst<br/>(Claude skills)"] --> MCP["MCP adapter"] --> ENG["Engine module"]
+    subgraph poc["PoC"]
+        GA["Guide / Analyst<br/>(Claude skills)"] --> MCP["MCP adapter"]
+        MCP --> ENG["Engine module"]
     end
-    subgraph app["App, later"]
-        UI["Student app + Console"] --> API["api / tutor adapter"] --> ENG2["Engine module<br/>(same code)"]
+    subgraph app["App — after Sprint 13"]
+        UI["Student app + Console"] --> API["api / tutor layer"]
+        MCPA["MCP adapter<br/>(same code)"] --> ENG2["Engine module<br/>(same code)"]
+        API --> ENG2
     end
-    ENG --> DB[("Postgres, real schema")]
-    ENG2 --> DB2[("Postgres")]
-    DB -.->|"pg_dump"| DB2
+    ENG --> DB[("Postgres")]
+    DB -.->|"pg_dump"| DB2[("Postgres")]
+    DB2 --> ENG2
 ```
 
 ## What crosses the boundary: a thin anchor, not the document
 
-The engine never sees a student's actual assignment — no equations, tables, or diagrams. All it needs is a stable way to say "this evidence is about that concept." Claude reads the raw material and coaches from it directly (its chat *is* the interface in the PoC — there's no renderer to feed a structured format to), and hands the engine only a small object called a **`StudyAnchor`**:
+The engine never sees a student's actual assignment — no equations, tables, or diagrams. All it needs is a stable way to say "this evidence is about that concept." Claude reads the raw material and coaches from it, and hands the engine only a small object called a **`StudyAnchor`**:
 
 ```json
 {
@@ -90,9 +93,9 @@ The engine never sees a student's actual assignment — no equations, tables, or
 }
 ```
 
-One `StudyAnchor` covers one prepared unit of study — an assignment in the PoC, a lesson brief once the Console exists. The same node identifiers then flow through the anchor, every evidence event, and the derived beliefs — that shared thread is all the engine needs. A richer content format for diagrams and tables might be worth building someday, but only once the app has an actual renderer to consume it; it is out of scope for the PoC.
+One `StudyAnchor` covers one prepared unit of study — an assignment in the PoC. The same node identifiers then flow through the anchor, every evidence event, and the derived beliefs.
 
-`StudyAnchor`'s shape lives as a JSON Schema in the shared contracts package, alongside the engine's other cross-boundary contracts, and it carries no version field. A version field only earns its place once two independently-deployed programs can disagree about a format — here, the code that produces the anchor and the code that reads it are the same process, so there is nothing to disagree.
+`StudyAnchor`'s shape lives as a JSON Schema in `packages/contracts` alongside other cross-boundary contracts, and it carries **no version field**. A version field only earns its place when two independently-deployed programs can disagree about a format. Here the code that produces the anchor and the code that reads it are in the same process, so there is nothing to disagree. Note that `packages/contracts` is imported by neither the engine's server nor its MCP surface — the engine owns the anchor as its own entity (`engine.study_anchors` + `study_anchor_nodes` tables, with a view type in `core/driving.ts`). The contracts package holds the wire shape the adapter side produces when handing an anchor to the engine, not the engine's internal representation.
 
 ## Keeping "AI drafts, human approves": seeding and the operator/student split
 
@@ -168,6 +171,10 @@ This is accepted as a non-concern for the PoC: the one real student is a consent
 
 ### Two checkpoints per assignment: homework submission and review session
 
+:::note[PoC-specific workflow]
+This two-checkpoint structure describes the assignment-help workflow in the PoC's pre-S4 Claude tutor skill — a stand-in that retires once the Student app ships. It was never packaged as a requirement for the Student app. The underlying evidence concepts (distinct checkpoint IDs, delayed recovery vs. self-correction, `scaffold_stamp`) are engine-level ideas that carry forward; the specific session flow described here does not bind the app.
+:::
+
 A homework assignment runs as two separate Analyst checkpoints. The student solves the assignment offline and unaided, then submits it. The Analyst runs a cold pass — no dialogue yet, just the answers — producing a report (a probe plan and contingent guidance). A later review session's Guide then walks through the problems problem by problem.
 
 The two runs are given **distinct `checkpoint_id`s**, one per Analyst run, and this matters for how the engine reads a correction:
@@ -181,9 +188,9 @@ The two runs are given **distinct `checkpoint_id`s**, one per Analyst run, and t
 
 ### Brief slugs are snapshots, validated at session start
 
-An assignment brief must name the concepts it covers — it cannot avoid this. But ADR-036 forbids storing a node slug as a durable reference, because slugs can be renamed and any stored copy becomes stale. The resolution: the brief carries an `anchorId` and a `briefSnapshotId`, and every concept slug it contains is treated as a **snapshot** valid only at the moment it was written.
+An assignment brief must name the concepts it covers — it cannot avoid this. A stored slug can go stale if a concept is ever renamed. The resolution: the brief carries an `anchorId` and a `briefSnapshotId`, and every concept slug it contains is treated as a **snapshot** valid only at the moment it was written.
 
-At session start, every concept name the brief contains is validated against a live `get_study_anchor(anchorId)` read. A name that no longer resolves to a current anchor member stops the session before it begins, rather than proceeding on a stale reference. Revising the brief mints a new `briefSnapshotId`. `evidence_events.brief_snapshot_id` is threaded end-to-end through `AppendCheckpointBatchInput`, so the evidence log records which snapshot of the brief was in use for each checkpoint.
+At session start, every concept name the brief contains is validated against a live `get_study_anchor(anchorId)` read. A name that no longer resolves to a current anchor member stops the session before it begins, rather than proceeding on a stale reference. Revising the brief mints a new `briefSnapshotId`. `evidence_events.brief_snapshot_id` is threaded end-to-end through `AppendCheckpointBatchInput` (closed by issue #112), so the evidence log records which brief snapshot was in use for each checkpoint.
 
 ## A known boundary: the engine is absorbing PoC application concerns
 

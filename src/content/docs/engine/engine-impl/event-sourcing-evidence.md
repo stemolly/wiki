@@ -1,102 +1,118 @@
 ---
-title: Event Log and the Evidence Schema
-description: Why student observations are append-only, what one evidence event contains, the chain of fixes that hardened its uniqueness key and catalog references, and how an operator audits beliefs back to their source.
+title: Event Sourcing & Evidence Schema
+description: The append-only foundation of the engine — CQRS split, three observation types, envelope/payload schema, altitude rule, idempotency key evolution, and catalog-ref integrity.
 ---
 
-Every belief the engine holds about a student starts as one thing: a permanent, append-only record of an observation. Nothing about a student's misconceptions, fragility, or reasoning patterns is ever written directly — it is always computed, on demand, from the log of what was observed. This page covers how that log is shaped, and the sequence of real bugs that hardened it into something safe to build on.
+The engine treats every observation about a student as a permanent, append-only fact. Beliefs — fragility, misconceptions, reasoning patterns — are computed from those facts on demand, never stored directly. When the belief model turns out to be wrong, you rewrite the derivation code and replay the log; no real student data is lost.
 
-## Why append-only, and what it buys
+Only the student-observation layer is event-sourced. Content, sessions, and identity use ordinary CRUD — the complexity is proportional to the real risk.
 
-The engine treats its evidence and prediction records as the single source of truth, enforced as append-only by the database itself, not just by application code. Everything else — misconception instances, fragility state, reasoning patterns — is a **projection**: a value computed by replaying the log, never a value stored and then edited.
+## The CQRS split
 
-The payoff is specific: the belief model this engine implements is a validation instrument, and it is expected to be wrong in places as real student data comes in. Because raw observations are preserved forever, fixing a wrong belief model means rewriting the derivation code and replaying it over the same log — not losing the cohort's history. Truncating the derived state and rebuilding it from the log is a supported, tested operation.
+The engine's `domain/` layer is decomposed into four areas:
 
-The domain is split along this line into a **write side** and a **read side**, and the load-bearing rule is that they never call each other directly — they only meet through the log:
+- `evidence` — validates and appends typed observations (the **write side**).
+- `projections` — a replay engine plus one projector per belief layer (the **read/derive side**).
+- `graph` — concept nodes, edges, traversal.
+- `catalog` — the registered misconception and pattern registry.
 
-- `evidence` — validates and appends typed observations (the write side).
-- `projections` — a replay engine plus one projector per belief layer (the read side).
-- `graph` and `catalog` — the concept map and the misconception/pattern registry, both consulted by the read side.
+The load-bearing rule is that **the write side and the derive side never call each other**. They meet only through the persisted evidence log. This separation is what makes "truncate the derived state, replay the log, get identical state" sound — if the write path called derivation logic, replay would diverge from live state.
 
-This separation is what makes "truncate the projections, replay the log, get identical state" actually true. If the write path could call into derivation logic, replay could diverge from what was live at the time.
+## Three observation types and the altitude rule
 
-## What one evidence event contains
+The evidence `type` has exactly three values:
+
+| Type | Payload carries | Maps to |
+|---|---|---|
+| `misconception_evidence` | `catalogRef`, `polarity: for\|against`, `confidence`, `excerpt` | Misconception projector |
+| `probe_outcome` | `outcome: correct\|incorrect\|partial`, `confidence`, `excerpt` | Fragility projector |
+| `pattern_evidence` | `patternRef`, `confidence`, `excerpt` | Pattern projector |
+
+These types name **observations about thinking**. They must never name a pedagogy mechanic (no `socratic_hint`) or a domain detail — domain lives in `catalogRef`/`patternRef` values and the payload, not in the type name. The three types survived eight adversarial tutoring cases across Math (Socratic) and Language (Correct/Reinforce) with no fourth type needed.
+
+**The altitude rule** draws the line between what the model writes and what the engine computes. The model records a *per-observation judgment* — a call about one moment: "I saw evidence of misconception X here, high confidence." The engine derives *cross-observation state* — the bookkeeping of activation, fragility, and propagation over many such judgments. Think of the model as a witness; the engine as the detective cross-referencing many witness statements — the witness never announces the verdict.
+
+Each event must be a **self-contained fact**: it references stable catalog ids, not the belief state at write time. The model may read current belief state as context to decide what to observe, but the observation it writes must stand alone. A "conclusion" event whose meaning depends on write-time state breaks replay and must be rejected.
+
+At the write boundary this rule is enforced by a **denylist**: any observation whose JSONB payload carries field names like `fragility`, `mastery`, `activation`, `beliefState`, or `misconceptionState` is rejected. A full per-type allowlist was considered and rejected — nothing yet consumes the payload's legitimate shape, so an allowlist would freeze a schema at the moment of least understanding.
+
+:::caution
+The denylist blocks named field names only. A belief-state field under an unlisted name still passes. Because the table is append-only, a contaminating row can never be corrected, only outweighed by later evidence. The denylist must be kept current.
+:::
+
+## Event schema: envelope, payload, checkpoint grouping
 
 Every evidence event splits into two zones with opposite reversibility.
 
-The **envelope** is a set of typed columns on the append-only table — `student`, `node` (optional), `type`, `scaffold_stamp`, `checkpoint_id`, `session`, `brief_snapshot`, `ts`, and an idempotency key. Because the table is append-only, an envelope column is effectively a one-way door: once chosen, it can't be cleanly changed, and old rows can never grow a new column.
+The **envelope** is a set of typed columns. Because the table is append-only, an envelope column is a one-way door — once chosen, it cannot be cleanly changed. Each column earns its place only if a fold keys or weights on it, or an audit trail joins on it. Current columns: `student_id`, `node_id`, `type`, `scaffold_stamp`, `checkpoint_id`, `session_id`, `brief_snapshot_id`, `ts`, `seq`, `segment`, `occurrence`, `ref`.
 
-The **payload** is a flexible JSON blob — reversible, because future projector code can reinterpret an old payload differently on replay. The rule for deciding which zone a field belongs in is deliberately simple: a field earns an envelope column only if a projector keys or weights on it, or an audit trail needs to join on it. Everything else goes in the payload — "when unsure, payload."
+The **payload** is a JSONB column. Reversible, because future projection code can reinterpret an old payload on replay. **When unsure, put it in the payload.**
 
-There are exactly three observation types, and they map one-to-one onto the three belief layers:
+`checkpoint_id` stamps every event produced by one Analyst run — one student attempt. Without it, two different stories collapse into the same raw events:
 
-```json
-// misconception_evidence
-{ "catalogRef": "cross-multiply-error", "polarity": "for", "confidence": "high", "excerpt": "..." }
+- **Self-correction:** a `for` and a `correct` in the *same* checkpoint → wobbled-but-recovered → stays fragile.
+- **Delayed recovery:** a `for` at one checkpoint, a `correct` at a *later* one → genuinely improved across attempts.
 
-// probe_outcome
-{ "outcome": "correct", "confidence": "high", "excerpt": "..." }
+Neither `session_id` (too broad — many attempts per session) nor timestamp proximity (no clean boundary) can draw the box. `checkpoint_id` does it by construction.
 
-// pattern_evidence
-{ "patternRef": "skips-verification", "confidence": "medium", "excerpt": "..." }
-```
+## Propagation is read-time, not stored
 
-These names deliberately describe **observations about thinking**, never pedagogy mechanics or subject content — no `socratic_hint`, no `correction_issued`. Baking a teaching move or a subject into the vocabulary would freeze a mode into permanent, replay-sensitive data. Everything domain-specific lives in the `catalogRef` / `patternRef` values and the free-form payload, not in the type name itself.
+A root misconception affecting all downstream concepts is **not stored on downstream nodes**. Belief projectors write only local, per-node facts. The "this downstream node is at risk because of an upstream misconception" view is computed at read time by walking prerequisite edges upward to find active upstream beliefs.
 
-### The altitude rule
+The rejected alternative — materializing propagation onto downstream nodes — would require fan-out writes every time a new edge or upstream misconception appeared, and replay would have to reproduce those fan-outs exactly. Keeping projectors per-node keeps each fold a clean deterministic function; graph traversal only discovers an existing belief, it never invents one.
 
-The line between what the model writes and what the engine computes is drawn at "altitude": the model records a **per-observation judgment** — a call about one moment, like "I saw evidence of this misconception here, high confidence" — while the engine derives **cross-observation state**, the mechanical bookkeeping of activation, fragility, and propagation across many such judgments. Think of the model as a single witness reporting what it saw, and the engine as the detective who cross-references many witness statements over time — the witness never gets to also announce the verdict.
+## The write path: prevalidation then atomic insert
 
-Every event has to stand alone as a fact that doesn't depend on the belief state at the moment it was written. The model may look at current belief state to decide what's worth reporting, but it must never write that state back out as an event — doing so would mean the meaning of a stored row depends on when it was written, which breaks the guarantee that replaying the same log always produces the same answer.
+`appendCheckpointBatch()` does three things in core before touching the database:
 
-This rule is enforced concretely at the write boundary: an incoming observation is rejected if its payload contains any of a fixed list of belief-state field names (`fragility`, `mastery`, `activation`, `beliefState`, `misconceptionState`, `stability`). A full per-field allowlist was considered and rejected, because nothing downstream consumes the payload's legitimate shape yet — an allowlist would mean inventing and freezing a schema before anyone actually needs one. The denylist blocks the concrete risk (a projector's own vocabulary leaking back into its input) without over-committing.
+1. **Resolve slugs** — node slugs to uuids; catalog/pattern refs to catalog-entry uuids.
+2. **Validate envelopes** — check the altitude-rule denylist and the three-type enum.
+3. **Assign occurrence keys** — compute `segment`/`occurrence`/`ref` for each observation.
 
-:::caution
-The denylist only catches the field names on the list. A belief-state field under an unlisted name still passes through untouched — and because the table is append-only, a contaminated row can never be corrected, only outweighed by later evidence. The list has to be kept current until a real payload consumer justifies replacing it with an allowlist.
-:::
+`PgEvidenceRepository` then emits one multi-row `INSERT ... ON CONFLICT DO NOTHING`. Because this is a single SQL statement, any row-level failure (FK violation, constraint breach) aborts the whole batch — no partial checkpoint is left behind. A schema-level trigger rejects `UPDATE` and `DELETE`, so `engine.evidence_events` is append-only at the database layer, not only by caller convention.
 
-### Grouping one attempt: checkpoint_id
+The repository's input contract changed when orchestration moved fully into core. `PgEvidenceRepository.appendCheckpointBatch` now expects **pre-keyed `KeyedObservation[]` objects** — already slug-resolved, already validated, already assigned `segment`, `occurrence`, and `ref`. Code that calls the repository directly with the old raw `EvidenceObservationInput[]` shape will not type-check. The correct entry point from outside the engine is `EngineModuleApi.appendCheckpointBatch`, which still accepts the original slug-based inputs and handles the keying step internally before delegating down. See [Hexagonal Module Structure](./hexagonal-structure) for the reasoning behind this boundary.
 
-`checkpoint_id` stamps every event produced by one model run — one student attempt. It exists because a single attempt can produce more than one event (a self-correction, for example, produces both a "for" misconception signal and a "correct" probe outcome), and the belief-deriving code needs to group same-attempt events before interpreting them.
+## The uniqueness key: a chain of fixes
 
-Without it, two very different stories collapse into the same raw events: a student who wobbles but recovers within one attempt (a weak signal that should stay fragile) looks identical to a student who fails one attempt and genuinely improves on a later one (a real recovery), unless the engine knows which events belong to the same attempt. Neither the broader session id (too coarse — many attempts) nor timestamp proximity (no clean boundary) can draw that box; `checkpoint_id` does it by construction.
-
-## Hardening the uniqueness key: a chain of fixes
-
-The evidence table needs a uniqueness key so that redelivering the same batch of observations (a routine case, since job delivery is at-least-once) does not duplicate them. Getting that key right took several rounds, each exposing a sharper failure mode than the last.
+Evidence delivery is at-least-once. The uniqueness key is what makes a redelivered batch a no-op instead of a duplicate. Getting it right took several rounds.
 
 ```mermaid
 flowchart LR
-    A["Positional key:<br/>observationIndex within a sort"] --> B["Identity-scoped key:<br/>groups by what each row means"]
-    B --> C["+ student_id, + a<br/>dedicated emission-order column"]
-    C --> D["ref stores the catalog<br/>entry's id, not its slug"]
+    A["Positional key<br/>breaks on changed<br/>observation set"] --> B["Identity-scoped key<br/>groups by meaning"]
+    B --> C["+ student_id<br/>prevents cross-student<br/>collision"] --> D["+ NULLS NOT DISTINCT<br/>covers probe outcomes"] --> E["+ seq bigserial<br/>for emission order"]
 ```
 
-**Positional keys don't survive a changed observation set.** The first key relied on a row's position within a sorted batch. But a position shifts if the batch changes shape — inserting or removing one observation shifts every index after it. A re-run of the same job reporting a slightly different set of observations could collide a genuinely new observation against an old one already stored under that position, silently dropping the new one and duplicating the old one — while the call still reported success, because nothing compared what was written against what was sent. The fix was to key rows on what they actually mean — student, checkpoint, node, type, and reference — rather than on where they land in a list.
+**Positional keys break on a changed observation set.** An index shifts when any observation is inserted or removed — `ON CONFLICT DO NOTHING` then keeps the wrong occupant and discards the incoming row, silently, with success returned. The fix: key rows on what they mean, not where they land.
 
-**An identity key still needs the right columns.** Even after keying on meaning rather than position, the key initially omitted `student_id`. Because `checkpoint_id` is a caller-supplied opaque string with no engine-side minting and no stated uniqueness requirement, two different students producing the same shape of observation under a naturally-formed checkpoint id (like `lesson-checkpoint-3`) could collide — one student's evidence silently discarded, the call still reporting success. This was fixed by making `student_id` the leading column of the uniqueness key.
+**The identity-scoped key.** The current key is `(student_id, checkpoint_id, segment, node_id, type, ref, occurrence)` with `NULLS NOT DISTINCT`. `occurrence` counts within each identity group `(node_id, type, ref)`, so inserting or removing one observation opens or closes its own group without shifting any other row's key.
 
-**Nullable key columns need `NULLS NOT DISTINCT`.** Two of the key's columns — the node and the catalog reference — can legitimately be `NULL` (a plain probe outcome carries no catalog reference at all). Standard SQL treats `NULL = NULL` as unknown, not true, so a plain `UNIQUE` constraint would never catch a duplicate row where both copies are legitimately `NULL` — every retried probe outcome would duplicate forever. Postgres's `NULLS NOT DISTINCT` option, added in Postgres 15, fixes this by treating two `NULL`s as equal for uniqueness purposes, which correctly matches what a `NULL` reference means here (this event type has no reference) rather than what SQL normally assumes (the value is unknown).
+**`student_id` is required.** Without it, two students using the same `checkpoint_id` string (e.g. `lesson-1-checkpoint-1`) can collide. The pre-ADR-026 key omitted `student_id` and suffered exactly this: one student's observation silently discarded with success returned.
 
-**Identity and emission order are two different jobs, and need two different columns.** The key's per-identity counter was originally reused to also carry the true order in which observations were emitted within a batch — but a batch's own internal counter and the sequence in which rows were actually written are not the same thing, and merging them meant the ordering-sensitive read (see the projectors page for which folds care about order) ended up sorting on the wrong value. The current schema carries two separate columns: the identity counter that the uniqueness key compares, and a database-assigned, ever-increasing sequence number used only for read-time ordering and deliberately left out of the uniqueness key — because a retried batch must reproduce the same identity key to be recognized as a duplicate, and a database-assigned counter never reproduces the same value twice. Gaps in that sequence number (from partial retries) are expected and harmless, since it is used only for ordering, never for counting or identity.
+**`NULLS NOT DISTINCT` is required.** `probe_outcome` carries no `ref`. Standard SQL treats `NULL = NULL` as unknown, so two probe outcomes on the same node would never collide under a plain `UNIQUE` constraint — every retried checkpoint would duplicate every probe observation permanently. `NULLS NOT DISTINCT` (Postgres 15+) treats two NULLs as equal for uniqueness, matching what a null reference actually means here.
 
-**One value, one place it's computed.** The catalog-reference value plays two roles in this key — it's one of the compared columns, and it's part of what the per-identity counter groups by. For a while it was computed independently in two different files. The two computations happened to agree, but nothing enforced that they always would; if they ever drifted apart, two different observations could silently share a key (losing one) or one observation's key could silently change between a write and its retry (creating a duplicate) — both permanent, in an append-only table. The fix collapsed this into a single, deliberately unexported function that both places now call, so there is structurally only one way to compute it.
+**Identity and emission order are two separate jobs.** `occurrence` is the identity counter in the uniqueness key. `seq` is a `bigserial` assigned by Postgres and deliberately **not** in the key — a retried batch must reproduce the same key to collide; a DB-assigned sequence value never reproduces. The read path sorts by `seq` alone. Gaps in `seq` (from partial retries) are expected and harmless — `seq` is for ordering, not counting.
 
-**A slug-based reference lets a rename orphan old evidence.** Until recently, an evidence event's catalog reference stored the *slug* of the catalog entry it pointed at, and the belief-deriving code matched on that slug. Renaming a catalog entry's slug — an ordinary operator action — would silently orphan every past observation that pointed at the old name: the match would find nothing, the row could never be corrected, and no test could catch it, because replay is still a pure function of its inputs; only one of those inputs quietly moved. This is now fixed: the reference column stores the catalog entry's permanent id instead, resolved once at write time. A batch is now all-resolved or entirely rejected — if any reference doesn't match a real catalog entry, nothing is written, and the caller must propose that entry before retrying. This also closes a second, related gap: previously nothing checked that a reference pointed at a real catalog entry at all, so evidence could anchor to nothing and fold to nothing forever, invisibly.
+> A stable sort key and a meaningful sort key are different requirements. Any total order makes a fold deterministic — including a random one.
 
-:::caution
-One catalog-reference gap remains open. Nothing currently *requires* an observation type that needs a reference to actually carry one — an observation can still be stored with a missing reference and simply never match anything in the fold, silently and permanently, because the write-time resolution only checks a reference that is present, not whether one should have been.
+**One value, one derivation.** The `ref` value plays two roles: it is a key column, and it defines the identity group `occurrence` counts within. For a while it was computed independently in two files. A future drift between them would silently create duplicates or drop observations, permanently. The fix is one unexported function used by both places — exporting it would re-open the second derivation site.
+
+## Catalog reference stability
+
+Until recently, `evidence_events.ref` stored a catalog entry's **slug**. Renaming a slug silently orphaned every prior row that pointed at the old name — the fold's join found nothing, the row could not be corrected, and no test caught it (replay remained a pure function; one input just moved).
+
+The fix: `ref` now stores the catalog entry's **uuid**, resolved at write time by `CatalogRepository.findIdsBySlugs(slugs, kind)`, scoped by kind (catalog slugs are unique per table, not globally). A batch is all-resolved or all-rejected — an unresolvable ref throws before any row is written. There is no FK column because a single column cannot reference both catalog tables; referential integrity comes entirely from write-time resolution.
+
+:::note
+One gap remains. The write boundary does not enforce that an observation type requiring a ref actually carries one. A `misconception_evidence` or `pattern_evidence` stored with `ref = NULL` folds to nothing forever, silently and permanently. The Analyst must always call `match_catalog` or `propose_catalog_candidate` to obtain a real ref before appending; the engine does not enforce this at write time.
 :::
 
-## Auditing beliefs back to their evidence
+## Operator evidence audit
 
-When an operator wants to verify that a recorded belief is backed by real interaction, the engine provides a middle step: one read that returns a student's evidence rows narrowed by the same filter value the belief read already used. Because the belief read and the evidence read share the same filter type, the value already in hand from finding the belief can narrow the trail directly, with no translation.
+The operator can verify a belief by reading the evidence rows behind it. The engine provides one read that returns a student's evidence rows narrowed by the same filter value the belief read already used — no schema change, no new port. Raw payloads are never surfaced on the student side; a session has no business auditing its own scaffolding history.
 
-This costs no schema change. The evidence-query port already returns every row with its scaffold stamp, checkpoint id, session id, and payload. Filtering and outbound slug mapping happen in the orchestration layer, with no new port, table, or migration.
-
-The audit is deliberately kept off the student surface. A session has no business reviewing its own scaffolding history, and raw payload values invite a model to reason about how it was previously coached.
-
-The third step of the audit — reading what was actually said — has no mechanism. Transcripts live inside Claude sessions and never enter the engine, so `evidence_events.session_id` carries a **human-authored convention naming a retrievable conversation**, rather than a system-generated identifier. The engine neither generates nor validates it.
+`evidence_events.session_id` carries a **human-authored convention** naming a retrievable conversation. The engine neither generates nor validates it. The groundedness check's final hop — confirming the recorded observation matches a real exchange — is unenforceable from within the engine alone.
 
 :::caution
-This is a known shortfall. The load-bearing half of the groundedness check — confirming that recorded observations match real conversation — is unenforceable from within the engine. The `session_id` value is entered by a human and can never be revised once real evidence exists on that row, because the table is append-only. The application layer closes this gap by persisting transcripts as real artifacts, but the proof-of-concept cannot. Two further limits are accepted deliberately: no review verdicts are stored, so a spot-check's number is not reproducible from data alone; and the read cannot distinguish a belief backed by one weak observation from one backed by ten.
+`session_id` is entered by a human and lands in an append-only table. It cannot be revised once real evidence exists on that row. The Student app closes the gap by persisting transcripts and board artifacts as first-class artifacts. In the PoC, this hop is unverifiable.
 :::

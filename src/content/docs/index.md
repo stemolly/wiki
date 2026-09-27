@@ -5,7 +5,7 @@ description: AI tutoring platform knowledge wiki — start here.
 
 Stemolly is an AI tutoring platform whose core claim is that it can see *how a student thinks* — not just what answers they produce. That claim is realised in a persistent **belief graph** (misconceptions, fragility, and reasoning patterns), a pluggable-pedagogy engine, and a two-app product (Student app + Console) designed to be rewired as the team learns.
 
-*Generated from durable knowledge notes on 18 August 2026 at 14:36 UTC.*
+*Generated from durable knowledge notes on 25 September 2026 at 08:05 UTC.*
 
 ## How to read this wiki
 
@@ -15,7 +15,7 @@ For the full topic list, see [All Topics](./all-topics.md).
 
 ## Sections
 
-**[Product](./product/index.md)** — What Stemolly is, its USP, and the scope of MVP-1 including the Engine-Validation PoC.
+**[Product](./product/index.md)** — What Stemolly is, its USP, the scope of MVP-1 including the Engine-Validation PoC, and the Student app's freehand board.
 
 **[Mental Model Engine](./engine/index.md)** — The three-layer belief graph, how it is implemented with append-only event sourcing, and how its accuracy is validated.
 

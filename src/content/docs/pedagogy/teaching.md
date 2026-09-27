@@ -1,160 +1,180 @@
 ---
 title: Teaching & Sessions
-description: How Stemolly structures lessons — pluggable pedagogy bundles, lesson and assignment briefs, Socratic probing policy, graduated scaffolding, and AI-assisted authoring in the Console.
+description: How Stemolly structures lessons, resolves pedagogy per session, conducts Socratic probing and scaffolding, authors briefs with AI assistance, and manages the tutor session lifecycle.
 ---
 
-Stemolly separates **teaching intent** from **live delivery**. A human author writes a teaching brief — goals, steps, trusted materials — and the AI tutor agent conducts the live conversation from that brief. Which pedagogy the agent applies depends on the subject domain and can be overridden at the lesson level. This makes the system flexible without changing any core engine code.
+Stemolly's teaching layer is built around one organizing idea: **pedagogy is a pluggable strategy, not a hard-coded behavior**. The engine knows nothing about Socratic questioning or diagnose-correct-reinforce cycles — those live in interchangeable declarative bundles, selected fresh for every session. Everything else — how briefs are authored, how the tutor probes understanding, how students get help when stuck, and how sessions open and close — flows from that foundation.
 
-## Two Pedagogies, One Pluggable System
+## Pedagogy as a Declarative Bundle
 
-Stemolly ships with two teaching approaches.
+A pedagogy strategy is a self-contained, named bundle. It declares:
 
-- **Socratic** — used for Math, Physics, and Chemistry. The tutor asks questions that lead the student to construct the idea themselves. It never states the answer directly.
-- **Correct / Reinforce** — used for Language. The tutor diagnoses errors, corrects them explicitly, and reinforces the correct pattern.
+- **Prompt fragments** — the language the tutor agent uses when it speaks
+- **Guardrails** — rules the agent must obey (for example, the Socratic rule: *never reveal the target insight*)
+- **A checkpoint policy** — when to pause and record what the student knows
+- **A scaffolding ladder** — the steps available when a student is stuck
 
-These are not hardcoded. Each pedagogy is a **declarative bundle** — a package of prompt instructions, guardrails (for example, the Socratic rule to never reveal the target insight), a checkpoint policy, and a scaffolding ladder. A small resolver picks the right bundle at the start of each session using a three-level cascade:
+The tutor module interprets the bundle. It never sees the strategy's name — only the bundle's contents. Adding a new pedagogy means writing a new bundle and a registry entry, with zero changes to the engine, tutor core, or API.
+
+:::note
+Strategy-as-code (callback hooks into the turn loop) was rejected as the default. Hooks would let Socratic assumptions quietly leak into core paths, and they are harder to inspect and compare across strategies. A hook escape-hatch may be added later if a pedagogy genuinely cannot be expressed declaratively.
+:::
+
+### How the Session Resolves Its Bundle
+
+Each session resolves its bundle through a three-level cascade:
 
 ```mermaid
 flowchart LR
-    A["Lesson override<br/>(author-set)"] -->|"if absent"| B["Mode default"]
-    B -->|"if absent"| C["Domain default<br/>(Math=Socratic, Language=C/R)"]
+    A["Lesson override\n(author-set)"] -->|"falls through if absent"| B["Mode default"]
+    B -->|"falls through if absent"| C["Domain default"]
     C --> D["Active pedagogy bundle"]
 ```
 
-If the lesson author has specified a pedagogy, that wins. Otherwise the mode default applies, then the domain default. In the current MVP only the domain defaults are populated, but the mechanism works at lesson grain — an author can override the pedagogy for any single lesson without touching anything else.
+In MVP-1, only the domain defaults are populated:
 
-**Why declarative bundles, not code hooks?** Strategy-as-code was rejected because code callbacks are harder to read and compare, and — more importantly — Socratic assumptions would quietly leak into core engine paths. A declarative bundle is inspectable. Adding a new pedagogy means writing a new bundle and adding a registry entry; zero lines in the engine, tutor core, or API change.
+| Domain | Default pedagogy |
+|---|---|
+| Math, Physics, Chemistry | Socratic |
+| Language | Correct / Reinforce |
+
+The per-lesson and per-mode slots exist in the resolver but are mostly unused today. When a new study mode is added later, it becomes a brief with a different pedagogy plus entry UX — no core logic changes.
 
 ## Three Study Modes
 
-Every session runs in one of three modes. The active pedagogy bundle applies in all three.
+Stemolly offers three modes. Each runs whichever bundle the resolver selects for the domain and lesson.
 
 | Mode | What happens |
 |---|---|
-| **Lesson** | The student works through structured content. The tutor guides alongside, applying the domain pedagogy to surface and address misconceptions in real time. |
-| **Assessment / Diagnostic** | The tutor poses problems to map the student's understanding. The goal is not a grade — it is a picture of the student's mental model. |
-| **Assignment Help** | The student uploads an assignment. The tutor coaches them through it using the domain pedagogy — never giving direct answers in Socratic subjects. |
+| **Lesson** | Student works through structured content; the tutor applies the active pedagogy to surface and address misconceptions in real time |
+| **Assessment / Diagnostic** | Tutor poses problems to map the student's mental model — the goal is understanding, not a grade |
+| **Assignment Help** | Student uploads an assignment; the tutor coaches them through it using the active pedagogy, without giving direct answers in Socratic domains |
 
-All three modes feed evidence back into the student's persistent mental model.
+All three modes feed data into the student's persistent mental model.
 
-## What a Lesson Actually Is
+## Lesson Briefs: Intent Without Fixed Content
 
-A lesson in Stemolly is not a fixed piece of content shown to the student. It is an **authored teaching brief** handed to the tutor agent, which then conducts a live conversation from it.
+The **curriculum is not slides or fixed text**. It is a collection of *lesson briefs* — documents of intent handed to the tutor agent.
 
-The author owns:
-- A **goal** — the concept or skill the session should leave the student owning.
-- An **ordered set of steps** — for example: pose the opening problem, guide the student to understand it, help them construct the theory, extend, practice, assign.
-- A **per-step intention** — what the tutor should be doing at each stage.
-- **Vetted materials** — readings, examples, and probe seeds the tutor must draw from, not invent.
+Each brief contains:
 
-The tutor agent owns the live conversation. It reads the brief, picks up the active pedagogy, and improvises — asking Socratic questions for Math/Physics/Chemistry, or working a diagnose/correct/reinforce/re-check loop for Language — while staying inside the author's steps and intent. The vetted materials act as a grounding anchor: the tutor cannot fabricate content, which is critical for an education product where a wrong formula or fact causes real harm.
+- A **goal** — what the student should be able to do after the lesson
+- An ordered list of **steps**, each with a per-step intention (for example: begin with a problem → guide comprehension → construct the theory → extend → practice → assignment)
+- **Trusted materials** — vetted content the agent must draw from, not invent
 
-The same brief can produce a different conversation for every student. Structure is repeatable; dialogue is not. The full lesson-brief schema is still being specified; this is the settled design direction.
+The agent owns the live conversation. It interprets the brief through the active pedagogy — improvising Socratic questions for Math, or working diagnose/correct/reinforce/re-check for Language — while staying inside the author's steps and intent. Trusted materials are the grounding layer: they prevent the agent from inventing incorrect content, which is critical for an education product.
 
-## Assignment Briefs: Facts, Not Procedures
+During a session the agent can also generate **on-demand supplements** — extra explanations or examples aimed at a specific gap. This is not a replacement for the structured curriculum; it fills gaps that the brief's materials do not already cover.
 
-When a student works through uploaded homework in **Assignment Help** mode, the tutor agent needs context the assignment document does not supply. That context comes from an **assignment brief** — a companion document an author or operator writes for each assignment.
-
-One rule governs what belongs in an assignment brief: **it supplies facts the agent cannot derive from the raw material — never a diagnostic procedure.**
-
-Two corollaries follow from this single rule.
-
-**Content vs. pedagogy** — if the brief tells the agent *how to judge a wrong answer*, that logic is valid only for one pedagogy. Because pedagogy is pluggable, the brief must stay neutral and let the active strategy decide how to respond.
-
-**Problem vs. student** — the brief describes the *problem*, not the *student*. "This distractor was designed to catch students who forget to check for a negative root" is a fact about the problem's design. "Students commonly miss step 3" is a prediction about people — it does not belong in the brief.
-
-An early draft brief violated this rule by listing per-step failure-mode labels (e.g. `fails: misses-negative-root`) so the agent could match a wrong answer to a named category. This was rejected: it preempts the Socratic dialogue's job of discovering what the student *actually believes*, and it only makes sense under one pedagogy.
-
-The accepted brief states:
-- The **crux** — the one insight the problem tests.
-- Which **concepts** it exercises.
-- Which **solution methods** are in-syllabus.
-- Where a bare-correct answer is still uninformative.
-
-These are facts the agent *reasons from*, never verdicts it looks up.
-
-:::caution[Brief ≠ answer key]
-An assignment brief that lists named failure modes or expected student mistakes crosses into diagnostic procedure territory. The brief describes the problem; diagnosis is the tutor agent's job.
+:::tip
+The lesson-brief schema is still being finalized. The design direction is clear but not yet fully specified.
 :::
 
-## Probing: How the Socratic Tutor Surfaces Fragility
+## AI-Assisted Authoring in the Console
 
-*This section applies to the Socratic pedagogy — Math, Physics, and Chemistry.*
+Authors create lesson briefs in the Console's **Author area**, with the AI doing the first draft:
 
-### Probes Are Not a Separate Mode
+1. The author ingests source material — a PDF textbook or pasted text.
+2. The AI drafts the **concept graph** (a prerequisite DAG for Math, an error/skill taxonomy for Language), proposes matches to existing canonical nodes, and drafts lesson briefs including goal, ordered steps, per-step intent, trusted materials, and a pedagogy defaulting from the domain.
+3. The AI seeds **misconceptions per node** — common wrong beliefs the tutor should watch for.
+4. The author reviews, edits, and approves every step.
+5. Nothing reaches the Student app without author approval — the AI drafts, it never auto-publishes.
 
-In Socratic teaching, questions **are** the teaching. A "probe" is simply a type of Socratic question — the tutor does not switch into a special testing mode. It continuously mixes two kinds of questions:
+## Assignment Briefs
 
-- **Constructive questions** — scaffold the student toward an idea. *"What does the distributive property tell us about (a+b)²?"*
-- **Testing (elenctic) questions** — stress an idea the student seems to hold. *"Why does that work?", "What if we changed this sign?", a transfer problem in a new surface form.*
+In the proof-of-concept pipeline, an **assignment brief** grounds the AI agent that analyzes student work. It follows one strict rule: it supplies only facts the agent cannot derive from the raw assignment material — never a diagnostic procedure.
 
-Fragility is read from how the student handles the testing questions. Every student turn in the dialogue is an evidence event: misconceptions surface, resolve, and prove fragile — all inside ordinary questioning, without any separate quiz mode.
+**What belongs in a brief:**
+- The problem's *crux* — the one insight the problem tests
+- Which concepts it exercises and which solution methods are in-syllabus
+- Where a bare correct answer is still uninformative without explanation
 
-### The Probing Policy: Interleave, Lean to Test, Enforce a Floor
+**What does not belong:**
+- Per-step state lists or failure-mode menus (for example, "if the student does X, mark it as Y") — that is a pre-written verdict, not a fact
+- Predictions about students — what a distractor was designed to catch is a fact about the problem; what students commonly get wrong is a prediction about people
 
-The tutor does not probe every concept exhaustively (that would hurt the experience), nor does it probe on a fixed schedule (too blunt). Instead it:
+The reason: a brief that tells the agent *how* to judge an answer only makes sense under one pedagogy. Stemolly supports more than one — so diagnosis belongs to the pedagogy bundle, and the brief provides only raw facts for the agent to reason from.
 
-1. **Continuously interleaves** constructive and testing questions throughout the lesson.
-2. **Leans toward testing** when answers arrive quickly or sound mechanical — a pattern-matching signal.
-3. **Enforces a hard floor**: a concept can never be marked *robust* until at least one genuine test — a transfer problem or a "why" question — has been passed unaided.
+## Socratic Probing
 
-The floor is the key safeguard. "Looks done" never means "confirmed solid" unless a real stress-test has been passed.
+Within the Socratic bundle (Math, Physics, Chemistry), **probing is not a separate test mode** — it is part of ordinary teaching. A Socratic lesson mixes two kinds of questions:
 
-### What Generates the Probes?
+- **Constructive questions** — scaffold the student toward an idea
+- **Testing / elenctic questions** — stress the idea: "Why does this work?", "What if we changed this?", a counterexample, or a new surface form
 
-The most effective probe is tailored to what the student just said. For example: *"You wrote 4m² + 25 — how does that compare to what we found for (a+b)²?"* Only the tutor, live in the dialogue, can write that. So probes are primarily **AI-generated and contextual**.
+Because every turn in the dialogue is an evidence event, the conversation itself is the evidence stream. Misconceptions surface, resolve, and prove fragile entirely inside ordinary questioning — no separate quiz is needed.
 
-Authors may also provide a small number of *seed transfer problems* per concept node. These seeds give measurement consistency: when two students both answer the same seed problem, their results are directly comparable. Seed problems live inside the lesson brief's vetted materials. Generation leads; authored seeds support measurement.
+### The Probing Policy
 
-## The Scaffolding Ladder: Help Without Spoiling the Lesson
+The tutor agent interleaves both question types continuously. A hard floor applies:
 
-### The Socratic Threshold
+:::caution
+A concept can never be marked **robust** until at least one genuine test — a transfer problem or a "why" question — has been passed without scaffolding.
+:::
 
-The no-direct-answer rule has a precise boundary: **the tutor never reveals the target insight a lesson exists to make the student construct.** It may supply incidental facts — a formula recall, an arithmetic step — that are not the thing being taught. The line is drawn at the lesson's core insight.
+The agent leans toward testing questions when a student's answers come too fast or sound mechanical, which signals pattern-matching rather than understanding. Fixed-schedule probing was rejected because it probes every concept regardless of need; the floor approach ensures no concept can *look* done without being *stress-tested*.
 
-### Graduated Rungs When a Student Is Stuck
+Most probes are **AI-generated in the moment**: the most useful probe is a follow-up tailored to what the student just said (for example, *"you wrote 4m² + 25 — how does that compare to what we found for (a+b)²?"*). Authors may optionally add seed transfer problems inside a concept's materials so that predictive-validity tests are comparable across students, but these seeds are the minority. Generation leads; authored seeds support measurement consistency.
 
-When a student cannot progress, the tutor climbs a **graduated scaffolding ladder** rather than repeating the same question:
+## Graduated Scaffolding
+
+The Socratic rule is precise: the tutor **never reveals the target insight** a lesson exists to make the student construct. It may supply incidental sub-steps — a formula recall, an arithmetic fact — that are not the thing being taught.
+
+When a student is stuck, the tutor climbs a graduated ladder rather than repeating the same question:
 
 ```mermaid
 flowchart LR
-    R["Reframe"] --> H["Hint"] --> W["Analogous worked example"] --> P["Drop to prerequisite<br/>(future — needs mature belief graph)"]
+    S["Student stuck"] --> R["① Reframe\nPresent problem\nfrom a new angle"]
+    R --> H["② Hint\nNudge toward\nthe next step"]
+    H --> W["③ Worked example\nShow an analogous\ncase, not the same one"]
 ```
 
-Help is **student-pulled** in the current version. The student triggers it — by typing "I'm stuck" or pressing a hint control — and the system chooses which rung to offer. The tutor does not force help on every silence; a minimal safety net offers (but never imposes) help on a prolonged stall. This preserves productive struggle by default and avoids a brittle frustration detector.
+Drop-to-prerequisite is deferred to a later release because reliably identifying a missing prerequisite — and interrupting lesson flow to address it — requires a mature belief graph.
 
-### Why Scaffolded Success Does Not Count as Robust
+Help is **student-pulled** in MVP: the student signals they are stuck ("I'm stuck" or a hint control), and the system chooses the rung. A minimal safety net *offers* help on prolonged silence but never imposes it, preserving productive struggle by default.
 
-Every scaffold step is stamped on the evidence event. A success achieved with a hint is not evidence the student can do it unaided — this mirrors the probing floor exactly: just as "unprobed" cannot mean "robust", "scaffolded" cannot mean "robust". Both rules protect the integrity of fragility measurement.
+Every scaffold is stamped on the evidence event. A scaffolded success is not evidence of robust understanding — it mirrors the probing floor: just as a concept needs at least one unaided test, a scaffolded pass does not count as one.
 
-Scaffolding is also suppressed entirely during locked predictive-validity checkpoints so assistance cannot leak into a graded outcome.
-
-## Curriculum: Authored First, AI Supplements On-Demand
-
-The primary curriculum is **structured content created by authors** — a collection of lesson briefs. During a live session the AI can generate supplementary material on demand — a fresh example, an extra practice problem — to reinforce a specific concept. This is a targeted supplement to the structured lesson, not a replacement for it. The structure keeps the learning path coherent; the AI fills gaps dynamically.
-
-### AI-Assisted Authoring in the Console
-
-In the Console's Author area, the AI assists curriculum creation at authoring time (not session time). Given a source PDF textbook or pasted text, it:
-
-- Drafts the **concept graph** — a prerequisite DAG for Math, or an error/skill taxonomy for Language.
-- Proposes how curriculum items match existing canonical concept nodes.
-- Drafts **lesson briefs** — goal, ordered steps, per-step intent, vetted materials, and a pedagogy defaulting from the domain.
-- Seeds misconceptions per concept node.
-
-Every step is **human-in-the-loop**. The author reviews, edits, and approves each draft. Nothing reaches the Student app without explicit author approval.
-
-:::note[AI drafts, humans publish]
-The AI is a drafting assistant at authoring time — it speeds up the work but never auto-publishes. Every lesson brief that reaches a student has been reviewed and approved by a human author.
+:::caution
+Scaffolding is suppressed entirely during a locked predictive-validity checkpoint so that assistance cannot influence a graded outcome.
 :::
+
+## Session Lifecycle and Checkpoints
+
+### One Open Session Per Student–Brief Pair
+
+Each combination of student and brief can have only one open tutor session at a time. When a session is requested:
 
 ```mermaid
 flowchart TD
-    PDF["PDF / source text"] --> AI["AI drafts concept graph<br/>+ lesson briefs + misconceptions"]
-    AI --> Review["Author reviews & edits"]
-    Review -->|"approved"| Live["Published to Student app"]
-    Review -->|"revised"| AI
-    style Live fill:#d4edda,stroke:#28a745
+    A["startOrResumeSession called"] --> B{"Existing row for\nstudentId + briefSnapshotId?"}
+    B -- "No" --> C["Create new session\nSeed statement + choice blocks onto board"]
+    B -- "Open" --> D["Resume existing session"]
+    B -- "Completed" --> E["Reject: conflict error"]
+    C --> F["Session active"]
+    D --> F
 ```
 
-This authoring-time assistance is distinct from the in-session supplement generation. The full lesson-brief schema is deferred to a build sprint.
+A Postgres partial unique index enforces the one-open constraint. If two requests race to create a session simultaneously, the losing request re-reads the winner's row and resumes into it — the raw `23505` conflict error is never surfaced to the caller.
+
+Statement and choice blocks are seeded onto the board **only on the create path**, never on resume.
+
+### Checkpoint Policy
+
+Checkpoints are the moments when the system records what the student knows. The checkpoint policy is part of the pedagogy bundle — four named firing events are declared in the first release.
+
+Today the only wired emitter is `classifyTurnCommitment`: a `submit` turn triggers an `answer_submitted` checkpoint event; a plain chat message triggers none.
+
+When a checkpoint fires, `planCheckpoint` examines everything since the last checkpoint:
+
+- It reads the current transcript and board logs.
+- It excludes the committing turn's own transcript rows — those belong to the *next* window.
+- It treats the board as new activity only when the folded `BoardView` actually changed.
+
+**Re-fire:** if the candidate window is empty — no new transcript rows, no board change — the checkpoint is a re-fire of the same problem. The system reuses the same per-problem ordinal `n` and relies on `ON CONFLICT … DO NOTHING` to make the row idempotent.
+
+**Normal fire:** if the window has new activity, `n` increments and the lower bound advances to the previous checkpoint's `through_*` markers.
+
+### Completing a Session
+
+`completeSession` does not simply mark the session closed. It first runs a `session_closed_mid_problem` checkpoint against the current logs. Only after that dispatch completes does it set `completed_at`. This guarantees no evidence is lost when a session ends mid-problem.

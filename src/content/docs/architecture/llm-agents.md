@@ -1,19 +1,26 @@
 ---
 title: LLM & Agent Layer
-description: How Stemolly orchestrates vendor-agnostic tiered LLMs and the Guide/Analyst two-agent tutor over the @noetaris/harness substrate.
+description: How Stemolly orchestrates multiple LLMs in a two-agent tutor — the Guide and the Analyst — using the @noetaris/harness substrate and a versioned Report as their only communication channel, plus the MCP operator surface that exposes the belief-graph engine to human curators.
 ---
 
-Stemolly is not tied to any single LLM vendor. The system routes each task to the right model tier — cheap and fast for routine work, strong and expensive for reasoning — and every model slot is swappable without touching agent code. On top of this interchangeable layer sit two purpose-built agents that together form the tutor: the **Guide** and the **Analyst**. They communicate through exactly one channel: a versioned, persisted artifact called the **Report**.
+Stemolly's AI layer has two parts that work closely together. The first is how LLM calls are made — a vendor-agnostic substrate built on the in-house `@noetaris/harness` framework, a tiered two-agent tutor (Guide + Analyst), a boot-validated model-selection registry, and versioned prompt management. The second is how human operators interact with the knowledge engine directly — the MCP server that exposes engine tools over stdio or HTTP, and the `operator-plugin` that wraps it into a Claude Code workflow. The two parts connect through the belief-graph engine: the Analyst writes evidence to it on every checkpoint, and operators curate it via MCP tools.
 
 ```mermaid
 flowchart TD
-    Student["Student turn"] --> Guide["Guide agent<br/>(fast model, per-turn)"]
-    Guide -->|"reads"| Report["Report<br/>(versioned, persisted)"]
-    Guide -->|"response"| Student
-    Checkpoint["Checkpoint trigger<br/>(submission / segment / end)"] --> Analyst["Analyst agent<br/>(strong model, async job)"]
-    Analyst -->|"reads"| Engine["Engine projections & catalogs"]
-    Analyst -->|"writes new version"| Report
+    S["Student"] -->|"turn"| G["Guide agent<br/>(fast model, per-turn)"]
+    G -->|"reads"| R["Report<br/>(versioned, persisted)"]
+    G -->|"response"| S
+    CP["Checkpoint<br/>(submission / segment / end)"] --> A["Analyst agent<br/>(strong model, async job)"]
+    A -->|"reads"| ENG["Engine projections & catalogs"]
+    A -->|"writes"| R
+    A -->|"writes evidence,<br/>gaps, candidates"| ENG
+    OP["Operator"] -->|"MCP tools"| MCP["mcp-server"]
+    MCP -->|"reads/writes"| ENG
+    PLUG["operator-plugin<br/>(Claude Code)"] -->|"launches"| MCP
+    OP -->|"uses"| PLUG
 ```
+
+---
 
 ## The @noetaris/harness substrate
 
@@ -21,171 +28,264 @@ Stemolly's agents are built on **`@noetaris/harness`**, an in-house TypeScript a
 
 The earlier approach was to hand-write provider adapters and a full gateway layer. That was replaced by harness for two reasons:
 
-1. **Vendor confinement.** Provider SDKs (Anthropic, OpenAI, Google, Ollama) now live entirely in adapter packages outside our repo (`harness-anthropic`, `harness-openai`, etc.), all implementing the same `harness-types` `LLM` interface. We do not touch vendor code.
-2. **Explicit ownership over framework magic.** Harness is straightforward and fully controlled — unlike LangChain or similar frameworks where behaviour emerges from conventions. This aligns with the project's "explicit over magic" principle.
+1. **Vendor confinement.** Provider SDKs (Anthropic, OpenAI, Google, Ollama) now live entirely in adapter packages outside our repo (`harness-anthropic`, `harness-openai`, etc.), all implementing the same `harness-types` `LLM` interface. We do not touch vendor code directly.
+2. **Explicit ownership over framework magic.** Harness is straightforward and fully controlled — unlike LangChain or similar frameworks where behaviour emerges from conventions. This aligns with the "explicit over magic" principle. Crucially, because we own harness upstream, when Stemolly needs something harness does not yet provide, we extend it upstream rather than working around it.
 
-With harness in place, the `llm` module shrinks from a full gateway to a **thin policy layer** with four jobs:
+### The llm module: a thin policy layer
 
-- **Tier registry** — maps `(tier, purpose)` pairs to a specific model and rate.
-- **Versioned prompt registry** — stores and retrieves prompt templates by version.
-- **Tagged metering** — writes `llm_calls` rows riding on `harness-otel` spans.
-- **Runtime assertions** — guards against unregistered purposes or malformed calls.
+The `server/src/llm` module is the server-side LLM boundary. With harness in place it shrinks from a full gateway to a **thin policy layer** with four jobs:
 
+```mermaid
+flowchart LR
+    GW["gateway.ts<br/>LlmGatewayApi.complete()"] --> PL["domain/policy.ts<br/>(prompt validation, tag enforcement)"]
+    PL --> AD["adapters/harness/adapter.ts<br/>(one-node agent.run per call)"]
+    AD --> HR["harness-anthropic / openai / google / ollama"]
+    PL --> PR["domain/prompts.ts<br/>PROMPT_REGISTRY"]
+    PL --> MS["domain/model-selection.ts<br/>resolveTier()"]
+    PO["ports.ts<br/>LLMPort, TaggedCompleteInput"] -.->|"interface"| AD
 ```
-┌─────────────────────────────────────────────┐
-│               llm module                    │
-│  tier registry → resolveTier(tier, purpose) │
-│  prompt registry → versioned templates      │
-│  metering wrapper → llm_calls rows (otel)   │
-│  runtime assertions → guard rails           │
-└────────────────┬────────────────────────────┘
-                 │ harness-types LLM interface
-     ┌───────────┼───────────┐
-     ▼           ▼           ▼
-anthropic     openai      ollama
- adapter      adapter     adapter
-```
+
+- **`gateway.ts`** exposes `LlmGatewayApi.complete(input)` to the rest of the server. It adds no other behaviour — it wires domain policy to an injected `LLMPort`.
+- **`ports.ts`** defines the internal provider seam: vendor-shaped message types, the required call tags (`agentRole`, `tier`, `purpose`, `promptId`, `promptVersion`), and the `LLMPort` interface that adapters implement. Prompt and tag enforcement happens in the gateway path, not inside adapters.
+- **`domain/policy.ts`** validates that every call has a registered prompt and a known purpose before any model is touched.
+- **`domain/model-selection.ts`** loads and owns the model-selection artifact (see [Model-selection registry](#model-selection-registry-adr-061)).
+- **`adapters/harness/adapter.ts`** is the one concrete `LLMPort` implementation; it never calls vendor SDKs directly.
 
 ### How a completion reaches the model: agent.run()
 
-The adapter used to drive a completion by calling `model.invoke()` directly, then manually wiring up observer lifecycle calls (`bindObserver()`, `onRunStart`, `onRunEnd`) by hand. That was a workaround — it required faking a `RunContext` that harness expects to create itself.
+The adapter wraps each completion in a **one-node `agent.run()` call**. The single step inside calls `ctx.model.invoke(...)`. Each `complete()` call supplies a **fresh `model` runtime slot** when invoking the agent, which is how concurrent calls avoid sharing observer state.
 
-Reading harness's own `create-agent.ts` and `loop-executor.ts` source showed the workaround was unnecessary. The adapter now wraps each completion in a **one-node `agent.run()` call**. Harness calls `bindObserver()` automatically on every resource slot and drives `onRunStart`/`onRunEnd` on every exit path — including failures. This means the `harness-otel` span opens under a real run root-span rather than a fabricated one.
+This replaces an earlier workaround where the adapter called `model.invoke()` directly and manually drove `bindObserver()`, `onRunStart`, and `onRunEnd` by hand — which required fabricating a `RunContext`. Reading harness's `create-agent.ts` and `loop-executor.ts` source showed the workaround was unnecessary: `agent.run()` auto-calls `bindObserver()` on every `ObserverAware` resource slot and drives `onRunStart`/`onRunEnd` on every exit path, so `harness-otel` spans open under a real run root-span.
 
-One subtlety to be aware of: `agent.run()` **never rejects** on a step error. A step that throws resolves as `{ signal: '$error', state: { $error } }`. The adapter branches on `outcome.signal` and rethrows `outcome.state.$error` to preserve the `LLMPort.complete()` rejecting-promise contract that callers expect. Harness construction errors (e.g. `NoNextStepError`) do still reject — and should, because those are bugs.
+One subtlety to know: **`agent.run()` never rejects on a step/domain error.** A throwing step resolves as `{ signal: '$error', state: { $error } }`. The adapter branches on `outcome.signal` and rethrows `outcome.state.$error` to preserve the rejecting-promise contract callers expect. Harness construction errors (e.g. `NoNextStepError`) do still reject — and should, because those are bugs.
+
+Timeout handling uses `Promise.race` plus `handle.stop()`, so a hung provider becomes a typed `ProviderTimeoutError` rather than an indefinitely stuck request.
 
 ---
 
 ## The two-agent tutor: Guide and Analyst
 
-The tutor experience is driven by **two agents working in different modes**.
+Think of a tutoring centre: an expert teacher analyses a student's work in depth between sessions, then passes structured guidance to the front-line tutor who actually runs the session. The expert never interrupts mid-session; the front tutor never guesses at diagnoses. Stemolly follows the same model.
 
-Think of a tutoring centre: an expert teacher analyses a student's work in depth between sessions, then passes structured guidance to the front-line tutor who runs the actual session. Stemolly follows the same model.
+### What each agent does
 
-```mermaid
-graph LR
-    S["Student turn"] --> G["Guide agent<br/>(fast model, per-turn)"]
-    G -->|"rendered response"| S
-    G -->|"reads Report"| R[("Report<br/>(versioned, persisted)")]
-    R -->|"guidance payload"| G
-    A["Analyst agent<br/>(strong model, per-checkpoint)"] -->|"writes Report"| R
-    T["checkpoint trigger<br/>(submission / segment / end)"] --> A
-    A -->|"reads transcript + projections"| DB[("Engine data")]
-```
+| | Guide | Analyst |
+|---|---|---|
+| **Model tier** | Fast, cheap, bilingual | Strong, expensive |
+| **Fires when** | Every student turn (synchronous) | At checkpoints: submission / segment / lesson end (async job) |
+| **Reads** | Latest Report, brief snapshot, conversation window | Engine projections, transcript, catalogs |
+| **Writes** | Nothing to the engine | Evidence, misconceptions, fragility, predictions, probe plan, pedagogy decision |
+| **LLM call tags** | `agentRole:guide`, `purpose:guide-turn`, `tier:fast` | `agentRole:analyst`, `purpose:analyst-checkpoint`, `tier:strong` |
 
-### Guide — the fast front agent
+The Guide **does not diagnose, does not write beliefs, and does not generate the lesson content it is teaching.** It renders what the Analyst concluded. The Analyst **never participates in the student-visible turn projection.** In code, `tutor/core/guide.ts` builds a six-field prompt from the folded board, transcript tail, student utterance, and answer key. `tutor/core/analyst.ts` expects machine-readable JSON back (not freeform tutor text), repairs one unparseable reply, and drops observations whose `nodeSlug` is outside the probed anchor set before writing anything to the engine.
 
-The **Guide** runs on a light, fast, bilingual model. It fires on every student turn and is responsible for:
-
-- Delivering responses in the student's language.
-- Rendering lesson plugins and UI artifacts.
-- Handling routine back-and-forth conversation.
-
-The Guide **does not diagnose or reason**. It never invents a misconception, never updates the belief graph, and never generates the content it is teaching. It renders what the Analyst concluded; it does not decide what that conclusion should be.
-
-### Analyst — the strong background agent
-
-The **Analyst** runs on a powerful model as an **asynchronous job**. It fires at meaningful checkpoints — after a submission, after a lesson segment, or at lesson end — not on every turn. It is responsible for:
-
-- Diagnosing the student's understanding.
-- Writing typed evidence observations, catalog matches, a probe plan, and predictions to the belief graph.
-- Making the pedagogy decision (what the Guide should do next).
-- Producing content-language artifacts where needed (for example, a corrected English sentence for an IELTS exercise).
-
-Because the Analyst runs off-turn, its cost does not add to conversational latency. This is the core of Stemolly's cost and latency model: the expensive work runs rarely, the cheap work carries the volume.
+Because the Analyst runs off-turn as an async job, its cost does not add to conversational latency. This is the core of Stemolly's cost model: expensive reasoning runs rarely, cheap rendering carries the volume.
 
 ### Naming note
 
-Older documents call these agents **Interface** (front) and **Expert** (back). Those names were replaced because "Interface" collided with too many other meanings in the system — plugin interfaces, API contracts, the UI surface. The current canonical names are **Guide** and **Analyst**. They are the `agentRole` enum values used in metering and in tier/purpose routing (`role=guide`, `role=analyst`).
+Older documents call these agents **Interface** (front) and **Expert** (back). Those names were replaced because "Interface" collided with too many other meanings — plugin interfaces, API contracts, the UI surface. The current canonical names, **Guide** and **Analyst**, are the `agentRole` enum values used in metering and in tier/purpose routing.
 
----
+### The Report: the only channel between them
 
-## How Guide and Analyst communicate: the Report
+```mermaid
+sequenceDiagram
+    participant ST as Student
+    participant GU as Guide agent
+    participant REP as Report
+    participant AN as Analyst agent
+    participant EN as Engine
 
-The **Report** is the only channel between the Analyst and the Guide. There are no side channels. This is a deliberate constraint.
+    ST->>GU: message
+    GU->>REP: read latest Report
+    GU-->>ST: response
+    Note over ST,GU: fast path, sync, every turn
+
+    Note over AN: async job fires at checkpoint
+    AN->>EN: read projections + transcript
+    AN->>REP: write new Report version
+    AN->>EN: write evidence, gaps, candidates
+```
+
+The **Report** is the only Analyst→Guide channel. There are no side channels. The Analyst writes a new Report version to storage; the Guide reads from storage. The Guide is never coupled to a live Analyst call.
 
 The Report is:
-- **Versioned** — carries a `schemaVersion` that is validated at the API boundary.
-- **Persisted before use** — the Analyst writes the Report to storage before the Guide reads it. The Guide is always reading from storage, never from a live Analyst call.
-- **The Observe-inspectable reasoning record** — because the Report is a stored artifact, the Console's Observe area can display and score the Analyst's reasoning without any extra instrumentation.
+- **Versioned** — carries a `schemaVersion` validated at the API boundary.
+- **Persisted before use** — the Guide always reads a stored artifact.
+- **Inspectable** — the Console's Observe area can display and score the Analyst's reasoning from the stored Report without extra instrumentation.
 
-If a checkpoint job fails or arrives late, the Guide keeps serving on the **previous Report**. The student's conversation continues — with slightly stale guidance, but never stalled. The job retries in the background.
+If a checkpoint job fails or arrives late, the Guide keeps serving on the previous Report — degraded guidance, never a stalled conversation. The job retries in the background.
 
 ### Open design gap: the Report schema
 
-The envelope-level guarantees above are settled. The **concrete field-by-field schema is not yet designed**.
+The envelope-level guarantees above are settled. The **concrete field-by-field schema is not yet designed**, and this is the single most load-bearing open task in the architecture.
 
 The fields that still need definition include:
-
 - The **guidance payload** — what structured instructions the Guide actually reads.
-- **Contingent guidance** — "if the student tries X, do Y" branches. This matters because the Guide may serve several turns from a single Report between checkpoints; it needs enough information to handle branching situations without calling the Analyst again.
+- **Contingent guidance** — "if the student tries X, do Y" branches. The Guide may serve several turns from a single Report between checkpoints; it needs enough information to handle branching situations without calling the Analyst again.
 - The **probe-plan** and **prediction** fields.
 
-:::caution[Most load-bearing open task]
-If the schema cannot express contingent guidance well, there will be pressure to run the Analyst on every turn — which would collapse the cost model the two-agent split exists to protect. As of mid-July 2026, `app/packages/contracts/src` contains only `error-envelope.ts`; the Report schema has not been coded yet.
+:::caution[Critical open task]
+If the Report schema cannot express contingent guidance well, pressure will build to call the Analyst on every turn — quietly collapsing the cost-tiering model the two-agent split exists to protect. As of mid-2026, `app/packages/contracts/src` contains only `error-envelope.ts`; the Report schema has not yet been designed or coded.
 :::
+
+### Implementation reality check
+
+The current codebase has not yet built the full persisted-Report handoff. Today, `runAnalystCheckpoint` is called directly and inline — it writes evidence, concept gaps, and catalog candidates immediately, with no `Report` type or repository involved. The durable checkpoint record stores only session/problem ordinals and transcript/board window bounds, not the Analyst's full reasoning payload.
+
+The Analyst reply does have a concrete transient schema already: the model must return JSON with an `observations` array, and may also return `conceptGaps` and `catalogCandidates`, each item field-narrowed before use. That machine-readable shape is committed in code — but only as an in-process LLM reply schema, not as the versioned persisted artifact the architecture describes. Building the persisted Report is the bridge still to cross.
 
 ---
 
 ## Reasoning language is per-domain, not hardcoded English
 
-The Analyst does not always reason in English. The rule is: **use whichever language avoids a lossy translation round-trip on the student's own work**.
+The Analyst does not always reason in English. The rule is: **use whichever language avoids a lossy translation round-trip on the student's own reasoning**.
 
-- For English-content domains (IELTS writing, SAT) the Analyst works in English natively.
-- For non-English content domains (Vietnamese K11 Math) forcing English would mean translating the student's Vietnamese reasoning into English so the Analyst can process it, then translating the result back — wrapping a lossy translation hop around exactly the evidence that feeds misconception detection. The Analyst instead reasons in the content language.
+- For English-content domains (IELTS writing, SAT) the Analyst works in English natively — no translation needed.
+- For Vietnamese-content domains (K11 Math) forcing English would wrap a Vietnamese→English→Vietnamese hop around exactly the evidence that feeds misconception detection. The Analyst instead reasons in the content language.
 
 Reasoning language is a **per-domain configuration** on the Analyst, defaulting to the content language. The assumed English performance edge in LLMs is small and, for math (which is largely symbolic), outweighed by the translation cost.
 
-One consistency rule applies regardless of reasoning language: **belief-graph node IDs are always canonical English**, since those IDs need to be language-neutral for the graph to work across domains.
+One consistency rule applies regardless: **belief-graph node IDs are always canonical English**, since those IDs must be language-neutral for the graph to work across domains.
 
 ---
 
-## Tier and purpose routing: resolveTier()
+## Model-selection registry (ADR-061)
 
-Every LLM call goes through `resolveTier(tier, purpose)` before a model is constructed. This function is the sole authority that maps a `(tier, purpose)` pair to a specific model ID and billing rate.
+### From a code table to a boot-validated artifact
 
-`resolveTier()` is the **first statement** in `adapter.ts`'s `createLlmProviderAdapter.complete()`. If the `purpose` is not registered, the call throws immediately — before any model is invoked and before any metering row is written. Previously, an unregistered purpose would silently invoke a model and write a billing row at whatever rate happened to be in a flattened lookup table; that table has been removed.
+The original tier registry was a plain TypeScript `(purpose, tier) → {model, rate}` code table. ADR-061 (accepted 2026-09-05) replaced it with a **model-selection artifact**: a committed default JSON file (`server/config/model-selection.json`) plus an optional per-environment override path via `STEMOLLY_MODEL_SELECTION_PATH`.
 
-The resolved `modelConfig.model` is passed as a required second parameter to `resolveHarnessModel(config, modelId)`, which knows only how to construct the invocable object for a given provider. The two responsibilities stay separate: `resolveTier` decides *which* model and rate; `resolveHarnessModel` decides *how* to build it.
+The artifact is parsed and zod-validated **once at boot** with fail-fast behavior. An unknown provider, a missing field, or a `promptVersion` absent from the prompt registry stops the process. The old process-wide `STEMOLLY_LLM_PROVIDER` switch is gone; each artifact entry now carries `{ provider, model, rate, promptVersion }` together. That means Guide-on-one-vendor and Analyst-on-another-vendor is expressible by construction, and `rate` cannot drift away from the model whose metering row it prices.
 
-### Keeping the registry maintainable
+```mermaid
+flowchart LR
+    JSON["server/config/model-selection.json"] --> LDR["loadModelSelection()<br/>(boot, zod-validate)"]
+    LDR -->|"fail-fast on bad entry"| RT["resolveTier(artifact, tier, purpose)"]
+    RT --> RHM["resolveHarnessModel(entry)<br/>(constructs invocable for entry's provider)"]
+    RHM --> AD["adapter.ts → agent.run()"]
+```
 
-The tier registry currently lives in `llm/domain/tiers.ts` alongside the `resolveTier` and `computeCost` logic. These are expected to change at different rates: the registry data changes often (new purposes, new models, updated rates); the resolution logic changes rarely. Mixing them means a maintainer editing a rate must read through throw logic they do not need.
+`resolveTier` is the **first statement** in `adapter.ts`'s `complete()`. An unregistered `purpose` throws immediately — before any model is invoked and before any metering row is written. The resolved entry is handed whole to `resolveHarnessModel(entry)`, which constructs the invocable object for that entry's provider. The two responsibilities stay separate: `resolveTier` decides *which* model, rate, and provider; `resolveHarnessModel` decides *how* to build it.
 
-The planned fix (tracked as issue #30) is to split them into separate files:
-- `tier-types.ts` — shared `Tier` and `ModelConfig` types (no logic, no data).
-- `tier-registry.ts` — the `TIER_REGISTRY` data table, importing from `tier-types.ts`.
-- `tiers.ts` (or equivalent) — the `resolveTier`/`computeCost` logic, also importing from `tier-types.ts`.
+### The two-axis lookup grid
 
-This keeps the import graph a one-directional DAG: neither data file nor logic file imports from the other. The registry stays as plain TypeScript (not YAML or JSON), a decision made in ADR-005 under the "explicit over magic" principle and not reopened.
+`purpose` and `tier` are two **independent** lookup axes, not a single combined key.
+
+- **`purpose`** (`guide-turn`, `analyst-checkpoint`, `echo-turn`) selects the prompt template and the metering tag.
+- **`tier`** (`fast` | `strong`) requests a model weight class — cheap and quick versus capable but slower.
+
+The caller supplies both on every call. `resolveTier(artifact, tier, purpose)` returns `artifact[purpose][tier]`. The zod schema requires every purpose to declare both a `fast` and a `strong` entry, so the committed artifact holds six cells — but the running app exercises only two: `guide-turn.fast` and `analyst-checkpoint.strong`. The other four, and the whole `echo-turn` row (tests and demos only), are schema-required placeholders. Keeping the axes separate means a purpose is not permanently welded to one weight class — the Guide could request `strong` for a difficult turn without a schema change.
+
+### Prompt versioning
+
+Prompt text lives in versioned modules: `prompts/guide-turn/v1.ts`, `prompts/analyst-checkpoint/v1.ts`, `prompts/analyst-checkpoint/v2.ts`, and so on. `domain/prompts.ts` statically imports them into a `PROMPT_REGISTRY[promptId][promptVersion]` code table.
+
+The rules are strict:
+- Missing or empty `promptVersion` is always rejected.
+- `resolvePromptText()` throws for any unregistered `(promptId, promptVersion)` pair.
+- `loadModelSelection()` cross-validates each artifact entry's `promptVersion` against the prompt registry at boot.
+
+Versions are **additive, not mutable in place**: `analyst-checkpoint` keeps version `1` registered while version `2` adds optional `conceptGaps` and `catalogCandidates` output fields. Old versions remain accessible so a rollback does not require a schema migration.
+
+### Known risk: model-string drift
+
+`loadModelSelection()` validates `provider` against an enum and `promptVersion` against the registered prompt table. But `model` remains any non-empty string, and `purpose` names are only coordinated implicitly between call sites, prompt IDs, and artifact keys. Vendor model-ID renames or a caller/artifact purpose mismatch are caught only at invoke time — not by a provider-specific schema. There is no automated check that a given model string still exists in the vendor's catalog.
 
 ---
 
 ## Testing without real LLMs: the mock-slot rule
 
-Because harness exposes the LLM as a swappable `model` slot, every automated test uses a **deterministic mock LLM** (or the free local Ollama adapter). No automated test ever calls a real provider. This is a firm rule.
-
-The split is:
+Because harness exposes the LLM as a swappable `model` slot, every automated test uses a **deterministic mock LLM** or the free local Ollama adapter. No automated test ever calls a real provider. This is a firm rule.
 
 | Level | What it proves | How |
-|-------|---------------|-----|
-| Level 0 | The plumbing works (routing, metering, error handling) | Mock/local slot + `@noetaris/harness-testing` |
+|---|---|---|
+| Level 0 | The plumbing works (routing, metering, error handling) | Mock/local slot + `@noetaris/harness-testing` (`runStep`, `MockObserver`) |
 | Level 1 | The belief model is true (diagnosis quality, groundedness) | Offline evaluation harness, real Claude adapter |
 
-A CI fitness-function test asserts that `NODE_ENV=test` never resolves to a real vendor provider. Switching any agent from mock to real Claude is a one-line slot change — the same mechanism that makes LLM-agnosticism concrete rather than aspirational.
+A CI fitness-function test asserts that `NODE_ENV=test` never resolves to a real vendor provider — it iterates every artifact entry and checks that all name `mock`. Switching any agent from mock to real Claude is a one-line slot change. This is the same mechanism that keeps LLM-agnosticism concrete rather than aspirational.
 
 ---
 
-## Operational observability is a separate concern
+## Operational observability: cost and latency by agent role
 
-Stemolly has **two distinct observability jobs** that must not be confused with each other.
+Stemolly has two distinct observability jobs that must not be conflated.
 
-**Validation observability** ("is the engine true?") checks whether the belief model is accurate — groundedness precision, predictive validity, belief-graph inspection. This is a functional capability realized in the Console's Observe area.
+**Validation observability** ("is the engine true?") — groundedness precision, predictive validity, belief-graph inspection — is a functional capability in the Console's Observe area.
 
-**Operational observability** ("is the system healthy and affordable?") is a non-functional requirement. It covers:
+**Operational observability** ("is the system healthy and affordable?") is a non-functional requirement covering:
 
-- **Cost** — LLM spend and token counts per turn, session, student, lesson, and domain, broken down by model tier and by agent role (`guide` / `analyst`).
-- **LLM performance** — latency per agent role, error/timeout/retry rates, model-routing visibility, throughput.
-- **Reliability signals** — persistence failures, guardrail violations.
+- **Cost** — LLM spend and token counts per turn, session, student, lesson, and domain, split by model tier and by agent role.
+- **Performance** — latency per agent role, error/timeout/retry rates, model-routing visibility, throughput.
+- **Reliability** — persistence failures, guardrail violations.
 
-The agent-role breakdown matters for a specific reason: the two-agent split is built on the assumption that the Analyst (expensive) runs rarely and the Guide (cheap) carries the volume. That assumption can only be verified by watching cost and latency split by agent role. If those numbers drift — if Analyst calls start appearing too frequently — it is an early signal that the Report schema design is not holding up under real usage.
+The per-agent-role breakdown is load-bearing: the two-agent split rests on the assumption that the expensive Analyst fires rarely and the cheap Guide carries the volume. Only watching cost and latency broken down by `agentRole` can verify that assumption. If Analyst calls start appearing too frequently, it is an early warning that the Report schema is not holding — visible in metrics before it appears in invoices.
+
+---
+
+## MCP operator surface
+
+### What the mcp-server package is
+
+`app/mcp` is the app's Model Context Protocol adapter. Its only job is to **map MCP calls onto engine ports**. All the actual knowledge-graph operations live in `@stemolly/server/engine`; the MCP package is a thin driving layer over those engine APIs.
+
+At boot, `mcp-server.ts` reads process config once (`MCP_ROLE`, `MCP_TRANSPORT`, `DATABASE_URL`, `DISPLAY_LANG`), creates one `pg.Pool` from `DATABASE_URL`, wires it directly into the engine's Postgres repositories — `PgGraphRepository`, `PgCatalogRepository`, `PgEvidenceRepository`, and others — then selects the tool set for the resolved role. There is no hop through Fastify or the REST API; the MCP process talks to the database directly.
+
+### Role-split tool surfaces
+
+The MCP server boots as exactly one role. That role cannot change at request time.
+
+```mermaid
+flowchart TD
+    CFG["MCP_ROLE env var<br/>(set at process boot)"] --> OS{Role?}
+    OS -->|"operator"| OT["createOperatorTools()<br/>+ shared reads = 18 tools"]
+    OS -->|"student writes"| NOTE["routed through tutor<br/>checkpoint path instead"]
+```
+
+**Operator tools** expose eighteen tools total:
+- *Graph seeding:* `seed_node`, `seed_edge`
+- *Catalog lifecycle:* `seed_catalog`, `approve_candidate`, `reject_candidate`, `reopen_candidate`
+- *Study-anchor maintenance:* `create_study_anchor`, `set_study_anchor_nodes`
+- *Concept-gap moderation:* `list_concept_gaps`, `resolve_concept_gap`, `dismiss_concept_gap`, `reopen_concept_gap`
+- *Evidence inspection:* `get_evidence_trail`
+- *Node curation (operator-only):* `match_nodes`, `merge_nodes`
+- *Shared reads (added by `server.ts`):* `get_belief_state`, `match_catalog`, `get_study_anchor`
+
+Every handler is a thin delegate into the engine API — no orchestration logic lives in the MCP layer.
+
+**Student engine writes are no longer a separate MCP role.** ADR-063 moved every engine write originating from a student session into `tutor`'s checkpoint path. The Analyst reply now grows additive `conceptGaps` and `catalogCandidates` lists that follow the checkpoint path's existing parse-failure and idempotency rules. The MCP remains an operator-only surface; the former student role, student-specific config, and public student-host deployment have been removed from the design.
+
+:::note[Shared reads]
+`shared-reads.ts` factors three read tools across role surfaces: `get_belief_state`, `match_catalog`, and `get_study_anchor`. The operator surface receives `get_belief_state` unchanged — it can query any `studentId` supplied on the wire. A student-facing caller would inject the process-configured `studentId` instead, so the trust boundary differs even though the underlying operation is the same.
+:::
+
+### Transport: stdio or stateless HTTP
+
+`main.ts` resolves `MCP_TRANSPORT` to either `stdio` or HTTP. The HTTP branch serves a **stateless `StreamableHTTPServerTransport`** — it constructs a fresh `McpServer` per request. ADR-034 records the intended remote deployment model: one process per role, TLS and caller authentication at the edge reverse proxy, and loopback-only publication of the MCP container. The Dockerfile keeps `MCP_ROLE`, `MCP_TRANSPORT`, and `DATABASE_URL` out of the image so the same built artifact can start as different role/transport combinations.
+
+---
+
+## operator-plugin: AI-assisted human curation
+
+The `operator-plugin` package is a **Claude Code plugin** (identified in `plugin.json` as `operator-plugin` v0.0.1). It is not the engine itself; it is a client-side wrapper that gives Claude Code seven operator skills bundled into two phases:
+
+**Content-preparation loop:** `seed-content`, `process-material`, `ingest-assignment`, `deliver-assignment`
+
+**Operator-audit loop:** `curate-catalog`, `triage-concept-gaps`, `review-evidence`
+
+The plugin reads and writes operator-owned workspace files under `${CLAUDE_PROJECT_DIR}` (`materials/`, `assignments/`, `progress.md`) rather than committing generated artifacts to the repository.
+
+### Judgment before execution
+
+Every skill consistently separates the AI-assisted judgment step from the actual write:
+
+- `seed-content` drafts nodes, prereq edges, and catalog candidates **before** any `seed_*` MCP call.
+- `ingest-assignment` drafts the assignment breakdown, node coverage, answers, and anchor scope **before** `create_study_anchor` or brief writes.
+- `triage-concept-gaps` and `curate-catalog` show each item **before** resolving, dismissing, approving, rejecting, or reopening it.
+- `process-material` confirms a rendered sample **before** the full crop run.
+- `deliver-assignment` is the exception — it performs no content judgment and only relays the result of its deterministic push script.
+
+The pattern keeps the human in the decision loop: Claude proposes, the operator approves, the MCP tool executes.
+
+### How the plugin connects to the MCP server
+
+`.mcp.json` defines one MCP server entry — `engine-operator` — which runs `node ${CLAUDE_PLUGIN_ROOT}/../mcp/dist/index.js` with `MCP_ROLE=operator` and `MCP_TRANSPORT=stdio`. The same config threads `DATABASE_URL` and `DISPLAY_LANG` from the Claude session environment. Claude Code spawns this stdio server when launched with `--plugin-dir`; operators do not run a separate long-lived MCP daemon.

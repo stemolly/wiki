@@ -1,6 +1,6 @@
 ---
 title: Mental Model Design
-description: How Stemolly models what a student actually thinks — three layers, event-sourced beliefs, hybrid identities, and one unified graph per student.
+description: How Stemolly represents what a student actually believes — a three-layer belief graph built from evidence, persisted across sessions, and unified across all subjects.
 ---
 
 Stemolly's Socratic AI does not just track what a student has completed. It builds a living **mental model** — a structured picture of how that student thinks — and carries it across every session. This page explains how that model is designed, why each piece is shaped the way it is, and what the data looks like in practice.

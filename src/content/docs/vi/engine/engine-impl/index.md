@@ -1,26 +1,35 @@
 ---
-title: Triển khai Engine
-description: Cách engine biến một nhật ký append-only của các quan sát về học sinh thành trạng thái belief có thể tái dựng — event sourcing, ba belief projector, định danh node và study anchor, cùng vòng đời catalog.
+title: Cách triển khai Engine
+description: Cách engine được xây dựng — event sourcing (truy vết sự kiện) chỉ ghi thêm, projectors CQRS (bộ chiếu CQRS), định danh node (nút), vòng đời catalog (danh mục), study anchors (mốc học tập) và cấu trúc mô-đun lục giác.
 ---
 
-Toàn bộ nhiệm vụ của engine là biến hành vi quan sát được ở học sinh thành một bức tranh đáng tin cậy về điều mà học sinh tin là đúng — mà vẫn không bao giờ đánh mất khả năng thay đổi cách nó tính ra bức tranh đó. Engine làm điều này bằng một lựa chọn cấu trúc lớn: ghi lại các quan sát một cách vĩnh viễn, và coi mọi thứ engine “biết” về một học sinh là thứ luôn được tính mới từ các bản ghi đó, chứ không phải thứ được lưu sẵn rồi chỉnh sửa trực tiếp.
+Engine (bộ máy suy luận) là lõi lập luận của Stemolly. Nó ghi lại mọi quan sát về một học sinh dưới dạng event (sự kiện) bất biến, rồi từ nhật ký đó suy ra các belief (nhận định) — fragility (độ mong manh), misconceptions (ngộ nhận), reasoning patterns (mẫu hình lập luận) — dưới dạng projections (phép chiếu) có thể dựng lại. Trang này là bản đồ dẫn tới các trang đi sâu hơn trong mục này.
 
-Chính lựa chọn đó định hình mọi phần còn lại ở đây. Mục này đi qua năm phần của câu chuyện:
+## Bức tranh tổng thể
 
-- **[Event Log và Evidence Schema](/vi/engine/engine-impl/event-sourcing-evidence/)** — vì sao các quan sát là append-only (chỉ nối thêm), một evidence event (sự kiện bằng chứng) thực sự chứa những gì, và chuỗi chỉnh sửa về tính toàn vẹn đã làm nó vững chắc hơn ra sao khi quá trình sử dụng thực tế bộc lộ các khoảng trống.
-- **[Ba Belief Projector](/vi/engine/engine-impl/projectors/)** — cách engine suy ra fragility (độ mong manh), misconception (ngộ nhận) và reasoning pattern (mẫu hình lập luận) từ cùng một log, với mỗi loại nằm sau cơ chế promotion gate (cổng thăng cấp) riêng của nó.
-- **[Định danh Node và Alias-Merge](/vi/engine/engine-impl/node-identity-alias-merge/)** — ba cái tên mà một khái niệm mang theo, điều gì xảy ra khi hai khái niệm hóa ra là cùng một khái niệm, và nỗ lực kéo dài để làm cho việc hợp nhất đó đúng ở mọi nơi.
-- **[Vòng đời Catalog Entry](/vi/engine/engine-impl/catalog-lifecycle/)** — cách một mục misconception hoặc reasoning-pattern di chuyển giữa candidate (ứng viên), approved (được duyệt) và rejected (bị loại), và vì sao trạng thái đó có thể đổi mà không cần rebuild (dựng lại).
-- **[Cấu trúc Hexagonal: Những bài học riêng của Engine](/vi/engine/engine-impl/hexagonal-structure/)** — một vài bài học sắc nét, rất riêng của engine, về việc từ vựng domain (miền nghiệp vụ) được phép tồn tại ở đâu và ranh giới port (cổng giao tiếp) của module (mô-đun) đã đi sai ở đâu.
-
-Ở trung tâm của cả năm phần là một sự tách đôi: một **write side** chỉ làm đúng một việc là nối thêm các quan sát có kiểu, và một **read side** suy ra mọi thứ còn lại bằng cách phát lại chúng. Hai phía này không bao giờ gọi trực tiếp lẫn nhau.
+Kiến trúc của engine dựa trên một nguyên tắc: **evidence events (sự kiện bằng chứng) mới là nguồn chân lý; beliefs chỉ được suy ra, không bao giờ lưu trực tiếp.** Khi mô hình belief hóa ra chưa đúng — điều được dự liệu ở giai đoạn này — ta sẽ viết lại mã projection và chạy lại trên nhật ký không đổi, thay vì làm mất dữ liệu thật của học sinh.
 
 ```mermaid
 flowchart LR
-    Evidence["evidence<br/>(validate + append)"] -->|"appends"| Log[("Append-only<br/>evidence_events")]
-    Log -->|"replay"| Projections["projections<br/>(one projector per belief layer)"]
-    Catalog["catalog<br/>(misconception & pattern registry)"] -.->|"read-time trust join"| Projections
-    Graph["graph<br/>(nodes, edges, traversal)"] -.->|"read-time alias & prerequisite resolution"| Projections
+    LLM["Analyst (LLM)"]
+    EV["evidence_events\nappend-only log"]
+    PJ["Projectors\nfragility · misconception · pattern"]
+    BS["belief_state\nread model"]
+    LLM -->|"append typed observation"| EV
+    EV -->|"replay / fold"| PJ
+    PJ --> BS
+    BS -->|"read context for next observation"| LLM
 ```
 
-Vì write side không biết gì về cách belief được tính toán, phần mã suy diễn có thể được viết lại và toàn bộ log có thể được phát lại để tạo ra một trạng thái belief mới, nhất quán — điều đặc biệt quan trọng với một hệ thống mà mô hình belief được kỳ vọng là sẽ sai ở giai đoạn đầu và có thể sửa với chi phí thấp về sau.
+Phía command (append) và phía query (fold) không bao giờ gọi lẫn nhau — chúng chỉ gặp nhau thông qua log đã được lưu bền vững.
+
+## Các trang trong mục này
+
+| Trang | Nội dung |
+|---|---|
+| [Event Sourcing & Evidence Schema](./event-sourcing-evidence) | Nền tảng append-only (chỉ ghi thêm), cách tách envelope/payload (phần bao/gói dữ liệu), thiết kế idempotency key (khóa chống ghi trùng), quy tắc altitude (mức tầng) |
+| [Projectors & Promotion Gates](./projectors) | Ba phép fold ở lớp belief — fragility FSM (máy trạng thái hữu hạn cho độ mong manh), misconception FSM (máy trạng thái hữu hạn cho ngộ nhận), pattern accumulator (bộ tích lũy mẫu hình) — và cách mỗi cơ chế đạt ngưỡng để đưa ra khẳng định mạnh |
+| [Node Identity & Alias Merge](./node-identity-alias-merge) | Mô hình node với ba định danh, khả năng thay đổi của slug (chuỗi định danh thân thiện), phân giải alias (bí danh), và tính đúng đắn khi merge (hợp nhất) |
+| [Catalog Lifecycle](./catalog-lifecycle) | Các catalog của misconception và pattern, luồng candidate → approved, cơ chế rejection (loại bỏ), mức độ tin cậy tại thời điểm đọc |
+| [Study Anchors & Assignment Briefs](./study-anchor-briefs) | Thực thể study anchor do engine sở hữu, các contract (ràng buộc) cho brief answer (câu trả lời ngắn), và kênh concept-gaps (lỗ hổng khái niệm) |
+| [Hexagonal Module Structure](./hexagonal-structure) | Cách tách driving port (cổng vào) và driven port (cổng ra), điều phối trong `module.ts`, và kỷ luật với adapter (bộ chuyển tiếp) |

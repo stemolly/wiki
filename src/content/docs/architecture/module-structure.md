@@ -1,175 +1,270 @@
 ---
 title: Module Structure
-description: How each backend module is laid out — the two-ring hexagonal shape, contract naming, barrel rules, dependency enforcement, and where tests live.
+description: How each backend module is structured as two rings, how shared packages are organized across the monorepo, and the tools that enforce every boundary.
 ---
 
-Every backend module in Stemolly follows the same internal layout: a **core ring** containing all business logic and contracts, a surrounding **adapter ring** of concrete I/O implementations, and a single public entry point. The layout comes from hexagonal architecture (ports-and-adapters), but the specific directory names, enforcement tools, and naming conventions are all project decisions — not generic conventions. This page explains each layer, the rules that hold it together, and the sharp edges that have tripped the project before.
+Two topics live on this page. The first is the internal shape of every backend module: a two-ring hexagonal layout with a set of invariants enforced by dependency-cruiser rules and ESLint fitness functions. The second is how code is shared across module and app boundaries through two dedicated packages — `@stemolly/contracts` for data schemas and types, and `@stemolly/ui` for frontend components.
 
 ## The Two-Ring Layout
 
-Each module (`engine`, `tutor`, `llm`, `identity`, etc.) has this shape on disk:
+Each module (for example `engine`, `tutor`, `llm`, `identity`) is divided into two rings.
 
 ```
 <module>/
-  core/
-    driving.ts    ← driving contract (what callers can ask this module to do)
-    driven.ts     ← driven contracts (what this module asks from infrastructure)
-    module.ts     ← orchestration — wires domain + driven contracts together
-    domain/       ← pure rules, projections, value types; no I/O
-  adapters/
-    pg-*.ts       ← driven adapters: Postgres repos, external services, etc.
-  index.ts        ← public entry point; re-exports only
+├── core/           ← inner ring: pure logic, no I/O
+│   ├── driving.ts  ← driving contract (how callers invoke this module)
+│   ├── driven.ts   ← driven contracts (interfaces the module needs from infrastructure)
+│   ├── module.ts   ← orchestration: wires domain logic with driven ports
+│   └── domain/     ← pure rules and domain types
+├── adapters/       ← outer ring: concrete implementations (Postgres repos, harness bindings, etc.)
+└── index.ts        ← the only file other modules may import
 ```
 
-The **core ring** — everything under `<module>/core/` — is the inside of the hexagon. It contains domain rules, the interfaces the module exposes (`driving.ts`), and the interfaces the module *needs from* infrastructure (`driven.ts`). Crucially, nothing inside the core ring imports anything from `adapters/`. That single rule is the hexagonal boundary.
+The core ring lives inside one directory — `<module>/core/` — for a specific reason: enforcement. When the core is one directory, the inward-only rule is one path pattern. Earlier, the core was described as a list of files (`domain/`, `ports.ts`, `module.ts`), which required one dependency-cruiser rule per file, hand-maintained, and broken every time a new core file was added. As one directory, the rule covers core files that do not exist yet.
 
-The **adapter ring** contains concrete implementations of the driven contracts: Postgres repositories, file-system bindings, third-party service clients. Adapters depend *inward* on the core (they implement an interface defined in `driven.ts`); the core never reaches *outward* to them.
+## The Inward-Only Invariant
+
+The most important rule: **nothing in the core ring imports from the adapter ring**. Adapters are constructed in `composition.ts` and injected inward, never pulled in from the core.
+
+This rule has two halves that must be stated together, because recording only one is what allowed the other to drift.
+
+**Half 1 — core never imports adapters.** This is expressed as the `core-no-adapters-import` dependency-cruiser rule. Earlier, the narrower `domain-no-adapters-import` rule covered only `domain/`; the module orchestration file `module.ts` sat outside it and could freely import adapters with the check green. The `identity` module did exactly that and passed every gate — demonstrating that the rule was too narrow. After it was widened to cover `^src/(<module>)/core/`, identity was fixed and is now the reference implementation. `metering` currently violates the invariant by importing its own adapter into `module.ts`.
+
+**Half 2 — an adapter is a leaf.** A driven adapter implements exactly one port, holds no other port as a dependency, and contains no decision that could be written without I/O. Orchestration across ports belongs in `module.ts`; business rules belong in `domain/`. The `identity` module conforms to both halves and is the reference implementation.
+
+:::note
+The `metering` module still violates Half 1 as of the last audit — it imports its own adapter inside `module.ts`. Use `identity` for reference, not `metering`.
+:::
 
 ```mermaid
 graph TD
+    EXT["Driving Caller<br/>(api module, mcp package)"]
     subgraph CORE["core/"]
-        DM["domain/"]
-        DRN["driven.ts"]
         DRG["driving.ts"]
         MOD["module.ts"]
+        DM["domain/"]
+        DRN["driven.ts"]
     end
     subgraph OUTER["adapters/"]
         A1["PgUserRepo"]
         A2["EmailAdapter"]
     end
-    EXT["Driving Caller<br/>(api module, mcp package)"]
 
     EXT -->|"calls via driving.ts"| MOD
     MOD --> DM
     MOD --> DRN
     A1 -->|"implements driven.ts"| DRN
     A2 -->|"implements driven.ts"| DRN
-    CORE -. "must NOT import" .-> OUTER
+    CORE -.->|"FORBIDDEN"| OUTER
 ```
 
-### Why one directory, not a file list
+### Why Half 2 Cannot Use dependency-cruiser
 
-Earlier versions of the rule named the core as a list of specific files (`domain/`, `ports.ts`, `module.ts`). That made enforcement fragile — every time a new file was added to the core, a dependency-cruiser rule had to be updated by hand. Collecting the core under one directory (`<module>/core/`) means the check is a single path pattern: anything under `core/` must not import anything under `adapters/`. It covers files nobody has written yet, automatically.
+Every adapter legitimately imports the same `driven.ts` file — to declare the port it implements. So the violation (holding *two* ports) and the correct case (holding one) look identical to a file-level import graph tool. Dependency-cruiser cannot distinguish them.
 
-### Naming: driving.ts and driven.ts
+The leaf-adapter rule is enforced instead by an ESLint AST rule (G-21). A clean `depcruise` run is therefore not evidence that the leaf invariant holds — it was never checkable that way.
 
-The contract files were previously called `api.ts` and `ports.ts`. Neither name indicated direction. `api` collided with the top-level `api` module name. `ports.ts` sounded like "all the ports" but held only the outbound half.
+### One Nuance: domain/ May Import driven.ts
 
-The new names reuse the vocabulary that the rules and ADRs already speak — "driving surface" and "driven ports" — so there is only one word pair across the whole codebase. The practical cost is that `driving.ts` and `driven.ts` differ by three characters and can be misread. That cost is bounded: a dependency-cruiser rule forbids the two files from importing each other, so picking the wrong one fails CI immediately.
+`core/domain/` may freely import `core/driven.ts`. This sometimes surprises people who know a stricter variant of hexagonal architecture called "functional core / imperative shell", where domain code may not touch port interfaces at all. That is a separate, stricter choice that Stemolly deliberately did not adopt. In standard ports-and-adapters, port interfaces *define* what the core needs — they live inside the hexagon, not outside it.
 
-### domain/ may freely import driven.ts
+A practical consequence: shared record types are declared once in `domain/` and imported outward by `driven.ts`. Duplicating a type across both files creates a seam that only type-checks by coincidence, with nothing to catch drift when one side changes.
 
-A common misreading of hexagonal architecture is that `domain/` must not import anything outside itself, including the port interfaces in `driven.ts`. This project does not take that position. The driven contracts live *inside* the hexagon — they are part of the core ring — so `domain/` is free to import `core/driven.ts`. What `domain/` must never import is `adapters/`.
+## Contract File Names: driving.ts and driven.ts
 
-Forbidding `domain/ → driven.ts` is the stricter *functional core / imperative shell* style. It is a valid choice, but it is not the choice made here.
+The two contract files are named `core/driving.ts` and `core/driven.ts`. These replaced `api.ts` and `ports.ts`.
 
-## The Leaf-Adapter Rule
+- `ports.ts` read as "all the ports" but held only the outbound half.
+- `api.ts` collided with the `api` module's own name.
+- `inbound.ts` / `outbound.ts` was considered and rejected — the ADR corpus and rule set already say "driving surface" and "driven ports" throughout, so a second word pair would leave two vocabularies for one concept.
 
-The core/adapters split defines where code lives. A second rule defines what an adapter *is*:
+The known cost: `driving.ts` and `driven.ts` differ by three characters and are easy to misread. This cost is bounded: the two files are forbidden from importing each other by a dependency-cruiser rule, so grabbing the wrong one fails CI immediately.
 
-> A driven adapter implements **exactly one** driven contract, holds no other port as a dependency, and contains no decision that could be written without I/O.
+Splitting the driving contract and driven contracts into separate files also serves enforcement. The rule "these two must not mirror each other" becomes "these two files must not import each other" — exactly the shape a path-based tool can express as a mutual pair of forbidden paths.
 
-Think of an adapter as a thin translation layer — it speaks the language of an external system (SQL, HTTP, a file path) and nothing else. Orchestration — deciding *which* adapters to call, and in what order — belongs in `module.ts`. Domain rules belong in `domain/`. An adapter that starts accumulating logic is an adapter that has taken on a role that belongs somewhere else.
+## Driven Adapters Are Always Outbound
 
-This rule and the core-no-adapters rule are recorded together for a reason: recording only the first is what let the second drift. The `identity` module conforms to both and is the reference implementation. `metering` violated the first clause (importing its own adapter into the core) until corrected.
+The `<module>/adapters/` directory holds **driven (outbound) adapters only** — Postgres repositories, file-based email, LLM harness bindings. The driving (inbound) side is never placed there. It is the `api` module's Fastify routes for the app, or the `mcp/` workspace package for the engine proof-of-concept.
 
-### Why the adapter ring only holds driven adapters
+This is consistent across every module with real content (`identity`, `metering`, `llm`, `engine`) and was true from the first module. It was left unwritten until recently — which had a cost. A reader who knows hexagonal architecture opens a module, sees a directory called `adapters/`, and expects both sides; finding only repositories, they conclude something is missing. The directory is not missing anything. The asymmetry is structural. There is no CI check for it — nothing can distinguish a driving adapter from a driven one automatically — so it stays review-enforced.
 
-The `adapters/` directory contains driven (outbound) adapters only. There is no driving (inbound) adapter inside a module. The driving side lives outside the module entirely: the `api` module's Fastify routes for the application, or the `mcp/` workspace package for the engine PoC.
+:::tip
+A driven port is named and shaped by what the **core needs from infrastructure**, never by how a caller invokes the module. A driving method and a driven port method having the same shape is always a coincidence, not a requirement.
+:::
 
-This is true across all four modules with real content and was true from the first module, but it went unwritten until recently. The cost of leaving it unstated: a reader familiar with hexagonal architecture opens `adapters/`, sees only repositories, and concludes the layout is incomplete. It is not — the asymmetry is structural and consistent. It follows from the monolith topology: the driving side is always another module or another package, never a nested directory of the module being driven.
+## The index.ts Barrel Rule
 
-## Enforcement: dependency-cruiser and ESLint
+Every module's `index.ts` must contain **re-export statements only**. No schemas, classes, interfaces with logic, or factory functions may be defined inline. All implementation lives in dedicated sibling `.ts` files; `index.ts` re-exports them.
 
-Two separate tools enforce the two separate invariants, because neither tool can enforce what the other one checks.
-
-### dependency-cruiser (file-granularity rules)
-
-`app/.dependency-cruiser.cjs` is the machine-readable architecture for this project. A PR that changes an allowed edge is by definition an architecture change and must cite an ADR.
-
-The config encodes four rule families:
-
-| Rule | What it checks |
-|---|---|
-| `engine-no-upward-deps` | The domain core imports nothing from orchestration or edge modules |
-| `declared-edges-only` | Any undeclared cross-module import is an error |
-| `no-deep-cross-module-imports` | A module is reachable only through its `index.ts` |
-| `core-no-adapters-import` | Nothing under `<module>/core/` imports `<module>/adapters/` |
-
-Run in CI as `depcruise:check`. The config is only meaningful if it actually fails on violations — the CI gate was verified by planting a deliberate forbidden import and confirming the build went red.
-
-#### What dependency-cruiser cannot check
-
-`dependency-cruiser` reasons at file granularity: it sees that file A imports file B, nothing more. The leaf-adapter rule — "this adapter holds only one port" — is a *symbol-granularity* rule. Every adapter legitimately imports the same `driven.ts` file regardless of how many ports it holds as a dependency. A clean `depcruise` run cannot tell the difference between a leaf adapter and an adapter that secretly holds three ports. For three consecutive issues, a clean `depcruise` run was read as proof of a healthy boundary when it could never have detected the defect.
-
-There is one technique that can move a symbol-granularity concern into file-granularity: put the two sides in separate files. Once `driving.ts` and `driven.ts` are distinct files, "these two contracts must not mirror each other" becomes "these two files must not import each other" — a rule a path-based tool can express. That mutual-import rule ships as two `from`/`to` entries (one per direction) because a single entry only checks one direction.
-
-### ESLint AST rule G-21 (leaf-adapter enforcement)
-
-Because `dependency-cruiser` cannot express the leaf-adapter rule, it is enforced by an ESLint `no-restricted-syntax` rule (G-21) scoped to `server/src/*/adapters/**/*.ts`. The rule flags any class property, constructor parameter property, or deps-interface field whose type name ends in `Port`, `Repository`, or `Store`. Implementing a port is a `TSClassImplements` node and is untouched — an adapter may still declare the interface it satisfies; it simply may not *hold* one as a dependency.
-
-G-21 carries a stated blind spot: it keys on the naming suffix convention. A port type named outside those three suffixes is invisible to it. The naming convention is therefore load-bearing, not cosmetic.
-
-## ESLint Flat Config Gotchas
-
-The project uses ESLint flat config (`eslint.config.js`). Two related bugs bit the `no-restricted-syntax` blocks during development and are worth knowing.
-
-### Silent merge-back on severity-only override
-
-When a later config block sets a rule to a value that contains no options — for example `['error']` or `['error', ...[]]` where the spread is empty — ESLint's config-array merge *does not clear* the earlier block's options. It keeps the earlier options and only swaps the severity. The later block appears to override the rule but silently inherits the earlier block's selectors back.
-
-This hit `engine-poc/mcp/eslint.config.js` when an override computed its `no-restricted-syntax` value as a base list minus one selector, which happened to be empty at that point, collapsing to severity-only and re-inheriting the selector it was trying to remove.
-
-**Fix:** exclude the file from the earlier block via `ignores: ['path/to/file.ts']` instead of relying on a later block to override. That way no cross-block merge is attempted at all.
-
-### ignores exempts from the whole block, not one selector
-
-The fix above has its own cost. In ESLint flat config, `ignores` operates at block level: it excludes matching files from *every* rule the block sets, not from one selector inside a combined rule. If a shared block bundles several `no-restricted-syntax` selectors together, adding a file to that block's `ignores` to spare it from one selector silently exempts it from all of them.
-
-This happened in `app/eslint.config.js`: an `ignores` entry added for one selector's sake later silently dropped a second selector added to the same block — missed by two review passes.
-
-**Fix:** never widen a shared block's `ignores` to solve one selector's exemption. Instead, leave the shared block's `ignores` untouched and add a separate trailing block for the files needing different treatment, restating whichever selectors should still apply there.
-
-## Barrel-only index.ts
-
-Every module's `index.ts` must contain re-exports only — no schemas, classes, interfaces, or factory functions defined inline. All implementation lives in dedicated sibling files that `index.ts` re-exports. This was discovered as a gap at Sprint 1 review, when several modules (`contracts`, `errors`, `logger`, `persistence`, `metering`, `llm`, and others) were found defining real logic directly in their `index.ts`.
+This was decided after a Sprint 1 review found multiple modules (`contracts`, `errors`, `logger`, `persistence`, `metering`, `llm`, `api`) defining real logic directly in their `index.ts`. The rule is enforced by a CI fitness function.
 
 ```ts
-// ✅ correct — index.ts is a barrel
+// ✅ correct — index.ts is a re-export barrel
 export { createLlmGateway } from './gateway';
 export type { LlmPort } from './core/driven';
 
 // ❌ wrong — logic defined inline in index.ts
-export function createLlmGateway(deps: Deps) { … }
+export function createLlmGateway(deps: Deps) { /* ... */ }
 ```
 
-The rule applies strictly: module factory functions are included. Exemptions: the process entry point `server/src/index.ts` and empty placeholder stub barrels. Enforced by a CI fitness function.
+Two exemptions exist:
+- The process entry point `server/src/index.ts`.
+- Empty stub barrels in modules whose real code lands in a later sprint — these preserve reserved space and are exempt while the stubs are still accurate promises.
 
-## Composition Root: Explicit Factory Wiring
+## Enforcement: dependency-cruiser as the Architecture Record
 
-At boot, every module's public factory (e.g. `createLlmGateway(deps)`, `createMeteringModule(deps)`) is wired together by hand in one composition root — `server/src/composition.ts`. The project does not use a DI container with decorator- or reflection-based auto-wiring.
+`app/.dependency-cruiser.cjs` is the machine-readable architecture. Changing an allowed edge in that file is by definition an architecture change and must cite an ADR. The config encodes:
 
-The reason is the same "explicit over magic" principle that drove other decisions in this codebase: a container hides the dependency graph exactly where the modular monolith's boundary discipline needs it to be visible. When you read `composition.ts`, you see the full wiring in one place. When auto-wiring assembles it invisibly, violating a boundary has no visible consequence until something breaks at runtime.
+| Rule | What it checks |
+|---|---|
+| `engine-no-upward-deps` (R-1) | Domain core imports nothing from orchestration or edge modules |
+| `declared-edges-only` | Any undeclared cross-module import is an error |
+| `no-deep-cross-module-imports` (R-3) | A module is reachable only through its `index.ts` |
+| `core-no-adapters-import` | Nothing under `<module>/core/` imports `<module>/adapters/` |
 
-## Test Placement
+The config runs in CI via `depcruise:check`. The negative case — CI going red on a deliberate violation — is what proves each gate actually bites.
 
-The core/adapters boundary applies to test files too. A path-based check cannot distinguish a test file from a source file, and should not — the exemption would be the hole in the boundary.
+### What dependency-cruiser cannot check
 
-An **integration test** that constructs real adapter objects (e.g. a `PgUserRepository` against a real database) cannot live inside `core/` — it would import from `adapters/`, tripping the `core-no-adapters-import` rule. So the unit test and the integration test of the same subject part company:
+Dependency-cruiser reasons at file granularity. The leaf-adapter rule (Half 2 above) is a symbol-granularity rule: every adapter imports the same `driven.ts` regardless of how many ports it holds. A clean `depcruise` run cannot prove the leaf invariant holds — the violation and the correct case look the same to the tool.
 
-- `core/module.test.ts` — lives with the file it tests, inside the core ring
-- `module.integration.test.ts` — lives outside the core ring, as a sibling of `adapters/`
+There is one technique that converts a symbol-granularity rule into a file-granularity one: put the two sides in separate files. Once `driving.ts` and `driven.ts` are distinct files, "these two contracts must not mirror each other" becomes "these two files must not import each other" — a rule a path tool can enforce. That mutual-import rule ships as two `from`/`to` entries, one per direction, because a single entry only checks one direction.
 
-Vitest already separates the two suffixes into different runs, so this split follows an existing seam rather than creating a new one.
+## Special Case: Pure Adapter Modules
 
-## The persistence Module Exception
+Some modules have no internal hexagonal layering at all. The `persistence` module's `domain/`, `ports.ts`, and `adapters/index.ts` were deleted, leaving only `pool.ts` and a re-export-only `index.ts`. The module's charter is constructing one database connection pool and handing it to other modules — there is no domain logic to protect.
 
-The `persistence` module is a pure adapter module with no internal hexagonal layering. Its `domain/`, `ports.ts`, and `adapters/` scaffold was deleted, leaving only `pool.ts` and a re-export `index.ts`.
+The deciding argument was that no one could name the future work that would populate `persistence/domain/`. A stub comment saying *"intentionally empty until a later issue adds real business rules"* was a false promise, directing every reader to wait for something that was never coming.
 
-The deciding argument: the module's sole job is constructing a `pg.Pool` and handing it to other modules. No one could name the future work that would populate `persistence/domain/`. A stub comment saying *"intentionally empty until a later issue adds real business rules"* was a false promise — it told every future reader to wait for something that was never coming.
+The `api` and `jobs` modules are also explicitly exempted from having a `domain/` folder — their charter is "no domain logic."
 
-This is explicitly not a precedent for removing stubs elsewhere. Around thirty placeholder files exist across other modules (`engine`, `tutor`, `pedagogy`, etc.) where the matching business logic genuinely lands in a later sprint — those stubs stay. The persistence deletion is a two-way door: if a genuine port ever emerges, the folder comes back in one commit.
-
-:::note
-`persistence` joins `api` and `jobs` on the documented exemption from having a `domain/` folder. The "empty barrel is exempt from R-24" clause in the barrel-only rule survives and is still needed for the remaining 27 placeholder stubs in other modules.
+:::caution
+This is **not** a precedent for removing stubs elsewhere. About thirty placeholder files exist across ten other modules (`engine`, `content`, `pedagogy`, `tutor`, `judge`, …). For those modules, the stubs are true promises: their real code lands in later sprints.
 :::
+
+## Where Integration Tests Live
+
+The inward-only rule applies to all files under `core/` — including test files. A path-based check cannot exempt tests, and should not; the exemption would be the hole.
+
+An integration test that wires real `Pg*Repository` instances against a real database cannot sit inside `core/`. It would import from `adapters/`, tripping the rule correctly.
+
+The unit test and the integration test of the same subject part company:
+
+- `core/module.test.ts` — stays next to `module.ts` inside `core/`
+- `module.integration.test.ts` — lives outside `core/`, as a sibling of the `adapters/` directory
+
+The project's vitest configuration already separates these two suffixes into different test runs, so the split follows an existing seam.
+
+## ESLint Flat-Config Pitfalls
+
+The `no-restricted-syntax` rules enforcing G-21 and others are written in ESLint flat config. Two non-obvious pitfalls have each caused real bugs.
+
+### Silent option inheritance on severity-only overrides
+
+When a later config block sets a rule to a severity-only value — for example `['error']`, or `['error', ...someEmptyArray]` — the config-array merger keeps the *earlier* block's options rather than clearing them. Only the severity is swapped. A later block fully replaces an earlier one only when it carries its own options.
+
+This caused an override in `engine-poc/mcp/eslint.config.js` to silently re-inherit the selector it was trying to suppress, defeating the override entirely. The safe fix is to exclude the file from the earlier block via `ignores` rather than relying on a later block to clear the rule.
+
+### ignores exempts the whole block, not one selector
+
+`ignores` operates at the block level. Adding a file to a block's `ignores` excludes it from every selector in that block's combined rule value — not just the one you intended to spare.
+
+This caused problems three times in the same issue. Adding `**/*.test.ts` to an `ignores` entry meant only to spare test files from one new selector silently dropped the pre-existing selectors from those test files too. A third instance was missed by both review passes and caught only in outer-loop review.
+
+**Fix:** never widen a shared block's `ignores` to solve one selector's exemption. Instead, add a dedicated trailing block scoped to the files needing different treatment, and explicitly restate the selectors that should still apply there.
+
+## Wiring at Boot: Explicit Factories, No DI Container
+
+Modules expose public factory functions — for example `createLlmGateway(deps)` or `createMeteringModule(deps)`. The server composition root calls these by hand to wire everything together at boot. There is no dependency-injection container with decorator or reflection-based auto-wiring.
+
+Explicit factories were chosen to keep the dependency graph visible. A DI container hides exactly what the modular monolith's boundary discipline needs to be readable: who depends on whom, in what order, with what arguments.
+
+:::tip
+Governance identifiers such as `ADR-021` or `R-14` belong in **docblocks**, never in runtime error messages or log lines. Those strings reach operators and agents who do not hold the design documents. They also rot silently — decisions are designed to be superseded, so an embedded identifier eventually points at a rule that no longer governs. Put the rule's *content* in the message (`must match /^[a-z][a-z0-9-]*$/`) and the citation in the docblock.
+:::
+
+---
+
+## Shared Packages
+
+Two packages in `app/packages/` are shared across build targets. `@stemolly/contracts` carries the data schemas and types that both the server and clients depend on. `@stemolly/ui` carries the frontend components that both the Student app and the Console app use.
+
+```mermaid
+graph LR
+    CON["@stemolly/contracts"]
+    UI["@stemolly/ui"]
+    STU["apps/student"]
+    CSL["apps/console"]
+    SRV["server"]
+    ZOD["zod"]
+
+    STU --> CON
+    STU --> UI
+    CSL --> CON
+    CSL --> UI
+    SRV --> CON
+    CON --> ZOD
+```
+
+### @stemolly/contracts
+
+`packages/contracts` exports the shared schemas and types for the whole monorepo: error envelopes, study anchors, board payloads, tutor turns, session close requests, and assignment list items. The package depends only on Zod and builds those definitions in isolation.
+
+The pattern has two consumers following different conventions. Server routes generate HTTP JSON Schemas directly from the Zod definitions. Shipped clients import the inferred TypeScript types. One deliberate exception: the operator plugin mirrors one board contract without importing the package.
+
+### @stemolly/ui
+
+`app/packages/ui` is a private workspace package named `@stemolly/ui`. It is the **only home** for any UI component shared between the Student app and the Console app (ADR-058). A component that is genuinely app-private stays local to that app.
+
+Both apps import components from `@stemolly/ui` and both import `@stemolly/ui/tokens.css` from their app entrypoints. The package exposes two entry points:
+
+- **`src/index.ts`** — a re-export-only barrel exposing component barrels and the icon API. This follows the repo-wide barrel convention: no implementation inline.
+- **`./tokens.css`** — a separate stylesheet entrypoint.
+
+The shared layer is **mechanism, not product prose**. Copy and user-facing strings belong in each app's own `strings/` seam, not embedded into shared components.
+
+#### Styling: CSS Modules and design tokens
+
+Components are styled with co-located `*.module.css` files. There is no CSS-in-JS library or utility-class framework.
+
+The token entrypoint `src/tokens/styles.css` fans into color, typography, spacing, effects, and base token files. Components consume values via CSS custom properties such as `--color-primary`, `--surface-card`, and `--space-*`. Pseudo-classes like `:hover` and `:focus-visible` move into the CSS Module; genuinely per-instance values stay on explicit `style` props. Icons inherit `currentColor` so colour stays token-driven without a freeform colour prop.
+
+#### Component API conventions
+
+Shared components declare explicit, narrow prop interfaces. Arbitrary DOM props are not forwarded wholesale; even `data-testid` test hooks are whitelisted property-by-property.
+
+Stateful selectors (`NavRail`, `Tabs`, `ThemeSwitch`) offer both controlled (`value` + `onChange`) and uncontrolled (`defaultValue`) modes. The `onChange` callback returns a domain value — not a raw DOM event.
+
+Accessibility wiring is centralized through `FieldShell` and `useId` so that every form primitive automatically gets `htmlFor` on its label, `aria-describedby` pointing to error or hint text, and `aria-invalid` on an errored field. The `Icon` primitive is decorative by default and becomes an announced image only when a label is supplied.
+
+#### The learning subpackage
+
+`components/learning` exports domain-shaped primitives for tutoring UI: `BeliefGraph`, `BeliefNode`, `BeliefStateLegend`, `ChatBubble`, `ThemeSwitch`, and `WhiteboardCard`/`WhiteboardNote`, plus belief-state constants.
+
+These components encode tutoring concepts in their APIs — graph nodes sit at percentage positions, edges can be tentative, chat turns distinguish `tutor` and `student` — but they stay presentational: they accept data and callbacks through props and import neither frontend state containers nor backend modules. They provide a shared visual vocabulary for learning workflows without moving learning logic into the UI package.
+
+### Board kinds: one name, three contributions
+
+A board block kind touches two build targets and three code locations. Adding a kind means contributing to all three — which is why it is modelled as one name driving three exhaustive registries, not as a plugin or manifest loaded at runtime.
+
+A kind is one name in the `BoardBlockKind` union in `@stemolly/contracts`. From that name, three contributions are required:
+
+1. **Data shapes** — declared in `@stemolly/contracts` alongside the union.
+2. **A renderer** — one entry in the client-side block registry.
+3. **A server module** — one file per kind in the tutor module's kind registry, exporting `{ interpret, guideTools }`.
+
+```mermaid
+graph TD
+    KIND["BoardBlockKind union<br/>in @stemolly/contracts"]
+    CLI["Client block registry<br/>(renderer per kind)"]
+    SRV["Tutor kind registry<br/>interpret + guideTools per kind"]
+    KIND --> CLI
+    KIND --> SRV
+```
+
+Both registries are exhaustive maps over the union. Adding a name fails both builds until every registry has an entry. A contribution that is not needed declares `'none'` explicitly rather than being absent — absence cannot be distinguished from a forgotten entry.
+
+A dynamic plugin loader was considered and rejected. A plain map lookup does the same work and moves the "you forgot a piece" error from runtime to compile time.
+
+The shipped union starts at `statement | choice`. `ink`, `photo`, `math`, and `annotation` join it when each is built. Two kinds were renamed at launch: `crop` became `statement` (because `crop` names the ingest artifact, not the board concept), and `strokes` became `ink` (the domain term, which also covers drawing and does not collide with the Guide's own marks).
+

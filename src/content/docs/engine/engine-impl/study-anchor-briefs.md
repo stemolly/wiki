@@ -1,88 +1,115 @@
 ---
-title: Study Anchor, Briefs, and the Evidence Link
-description: How the engine stores a session's "in scope" concept list, how an assignment brief structures its answer key, and how both tie into the evidence log.
+title: Study Anchors & Assignment Briefs
+description: Engine-owned study anchor entity, concept-gaps tracking, brief answer contracts, and the ingestion workflow that ties them together.
 ---
 
-Two concerns meet here: the engine needs to tell a session model which concepts are in scope for a given unit of study, and a session model needs to know what a correct answer looks like for a given problem. Both are authored artifacts — not computed from the evidence log — but both feed the evidence log in precise ways, so they live under engine management rather than in free-standing files.
+A tutoring session must know which concepts are "in scope" and what a correct answer looks like. Both are authored artifacts rather than computed data — but both feed the evidence log in precise ways, so they live under engine management rather than in free-standing files.
 
-## What a study anchor is
+## The study anchor (ADR-037)
 
-A study anchor is the list of `{ slug, displayName }` pairs that represents the concepts a prepared unit of study covers. It is how a session model learns which concept slugs exist for the material at hand, without any enumeration of the concept graph.
+A **study anchor** is an engine-owned entity that holds the set of concept nodes for one piece of study material. It lives in two tables:
+- `engine.study_anchors` — the anchor's readable natural key and a label.
+- `engine.study_anchor_nodes` — member rows as **uuid foreign keys** to `engine.nodes`.
 
-The engine stores an anchor in two tables:
+Because slugs are mutable, the anchor stores uuids, not names. Reading the anchor forward-resolves each stored uuid through the merge map and then to its **current** slug, so a member whose node was merged away is served under the survivor's name.
 
-- `engine.study_anchors` — one row per anchor, with a readable natural key and a label.
-- `engine.study_anchor_nodes` — membership as **uuid foreign keys** to `engine.nodes`.
+An anchor-file approach was the obvious alternative and was rejected on two grounds: a mutable slug means a file of names would drift after any rename, and only `core/module.ts` may resolve ids to slugs so the file could not be read anywhere else.
 
-Because a slug is a mutable display key, the anchor cannot store bare names — doing so would orphan memberships any time a concept is renamed. Because only `core/module.ts` may turn node ids into current slugs, the anchor holding ids cannot live outside the engine. An operator-owned file — the obvious alternative — fails on both counts.
+### Write operations
 
-Reading an anchor forward-resolves each stored uuid through the merge map, then maps each live id to its current slug. A member whose concept was later merged into another is served under the survivor's name, with no manual update needed.
+Two write operations exist, neither named `seed*` — the verb `seed*` in this engine means an incremental additive upsert, the opposite of what an anchor write does.
 
-### Create vs. replace members
+- **Create:** creates an anchor and throws if the id already exists. The anchor row and its members are written in a single atomic CTE, so a partial failure rolls both back.
+- **Set members:** a full-replace write that replaces the entire member set. This is where a session's unseeded-concept report ends — after the operator seeds the missing nodes, the anchor is updated.
 
-The anchor's write surface is two explicitly distinct operations, not a single idempotent upsert:
+Member revision is not an edge case. It is the normal path for maintaining an anchor over multiple ingestion runs.
 
-- **Create** — writes the anchor row and its initial member rows as a single atomic statement, and throws if an anchor with that id already exists. Because both writes happen in one CTE, any member-insert failure (a duplicate node id or a foreign-key violation) rolls back the anchor row too.
-- **Replace members** — a full-state write that replaces the current member set entirely.
+### Read behavior
 
-The write is not named `seed*`, because every `seed*` operation in this engine is an additive, idempotent upsert into an open, growing collection. An anchor is a closed list written whole — borrowing the same verb would silently mislead any caller who has learned that `seedNode` is always additive.
+`getStudyAnchor(id, lang)` falls back from the requested locale to English, then to the raw slug, rather than throwing on a missing translation. A caller never gets an error just because one node has not been translated yet.
 
-Before writing, resolved member ids are deduplicated — so a caller passing the same concept slug twice (possibly under an alias slug and the survivor's slug) still produces one member row, not a duplicate-key error.
+`getStudyAnchor` throws when the given anchor id does not exist, instead of collapsing that case into the same empty-members response returned for a legitimately empty anchor. Treating a missing anchor the same as an empty one hides caller errors.
 
-### How `getStudyAnchor` handles edge cases
+### No listing operation
 
-Two behaviors are worth knowing before calling it:
+There is no anchor-listing operation on any surface. An anchor is read by an id the caller was given. Listing all anchors would let a handful of calls reassemble the graph.
 
-- **A nonexistent anchor id causes a throw**, not an empty member list. The repository signals "no anchor at that id" differently from "anchor exists but has zero members," because collapsing both into the same empty response hides caller errors.
-- **A missing translation never causes a throw.** When resolving each member's `displayName`, the engine falls back from the requested locale to English, then to the raw slug, rather than failing the whole read because one node lacks a translation in the requested language. A partially-translated anchor reads cleanly; only the untranslated member falls back, not the call.
+### How the anchor id reaches evidence
 
-## How the anchor id reaches the evidence log
+`append_evidence` accepts an explicit optional `briefSnapshotId` parameter — not an injected config value. Unlike student id or display language (which are stable for the lifetime of a single MCP process), which anchor is "in force" varies per session and per checkpoint — the property that makes config injection inappropriate here.
 
-When a session runs under a specific study anchor, the id of that anchor is recorded on each checkpoint's evidence rows in the `brief_snapshot_id` column. This creates a durable link from any future evidence-audit read back to the exact anchor that was in force when the observations were made.
+`brief_snapshot_id` is a nullable column. A checkpoint with no active anchor stores `null`. The column existed in the schema with all plumbing wired end-to-end, but was storing `null` for every checkpoint until the value was explicitly threaded through the call path — the structural readiness didn't mean the value was being populated.
 
-The anchor id reaches `append_evidence` as an **explicit caller-supplied parameter** — the Analyst supplies it on each call. It does not follow the same config-injection pattern used for things like student id and display language (which are stable for the lifetime of a single MCP process and can be baked in at startup). Which anchor is "in force" can vary per session or checkpoint, so config injection does not apply here.
+## Concept-gaps tracking (ADR-038)
 
-`brief_snapshot_id` is a nullable column. A checkpoint appended with no anchor in force stores `null`, unchanged from before this wiring was added. The column existed in the schema from earlier work — all the plumbing was in place — but every checkpoint was storing `null` because the value was never actually threaded through the call path until it was explicitly wired in.
+When a session meets a concept nobody seeded, it must record that omission — otherwise the signal that the seeding was incomplete is lost the moment the session ends.
 
-## What a brief's answer key contains
+**The channel that existed could not serve this need.** `propose_catalog_candidate` requires a home node slug that resolves. A concept with no node cannot even be the home of a proposal. The one existing session-to-operator channel was structurally closed to exactly this case.
 
-An assignment brief is the authored document that records, for each problem, what the correct answer is and how the reviewing session should interpret student responses.
-
-The answer structure does more than just state the expected value. It distinguishes two categories of correct-but-not-canonical answers:
-
-- **Accepted forms** — mathematically equivalent to the canonical answer. For example, `2/4` and `1/2` are the same number; a student writing the unsimplified form is simply not wrong. Matching an accepted form records no evidence at all — it is the same answer.
-- **Unfinished forms** — technically correct but missing a required step. For example, giving only one root for a quadratic equation with two roots, or leaving a fraction unsimplified when the problem asked for a simplified form. An unfinished match records at most a pattern observation (a habit of stopping short), never a misconception.
+ADR-038 adds `engine.concept_gaps`: one row per report, carrying a foreign key to the anchor that was short, the concept as free text, and a status the operator transitions. There is no deduplication key on `(anchorId, sessionId, term)` — two reports of the same concept in the same session remain as separate rows. `module.ts` applies a default view: calling `listConceptGaps()` without an explicit `statuses` argument returns only `open` gaps; the repository's raw read exposes all statuses when a caller explicitly names them.
 
 ```mermaid
-flowchart LR
-    answer["Student answer"] --> check{{"How does it compare?"}}
-    check -->|"Canonical or accepted form"| none["No evidence recorded"]
-    check -->|"Unfinished form"| pattern["Pattern observation only<br/>(never a misconception)"]
-    check -->|"Wrong"| evidence["Misconception or<br/>probe-outcome evidence"]
+stateDiagram-v2
+    [*] --> open : session reports gap
+    open --> resolved : operator seeds the concept
+    open --> dismissed : operator decides it is out of scope
+    resolved --> open : operator reopens
+    dismissed --> open : operator reopens
 ```
 
-This split prevents a specific evidence quality problem: collapsing it into one judgment would risk writing "doesn't understand the concept" into an append-only log for a student who was simply one step short of done. The same shape appears across subjects — in Physics, wrong units is a genuine misconception while wrong significant figures is the same "unfinished" class as an unsimplified fraction, even though the surface error looks the same.
+`resolved` and `dismissed` must remain distinct — a real seeding miss and a concept deliberately kept out of scope are different measurements.
 
-### Whether CAS-checking applies is a fact, not a runtime instruction
+**The rate of these reports is the only measurement of how good the seeding was.** That is the stated reason node creation was kept off the session path. Without a destination, the signal the design paid for is lost.
 
-Not every answer can be checked by a computer algebra system (CAS) — `AD ⊥ BC` (a geometric relation) cannot be parsed as an expression, while `x = ±√2` can. The brief records an `answerKind` per answer at ingestion time, declaring whether it is CAS-eligible (`value`, `expression`, `set`, `inequality`) or not (`geometric-relation`, `description`, `proof`). The Analyst reads this at session time as a fact about what kind of answer this is, not as an instruction to invoke any particular tool.
+Two limits are inherent and accepted:
+- Nothing can check that a session *actually reports* a gap, so the count is a lower bound.
+- Because the concept is free text, the table counts reports, not concepts.
 
-The ingestion process uses the declared kind as the basis for cross-checking its own work: a declared-eligible answer is parsed and verified against the CAS; a declared-ineligible answer is verified by operator reading alone, flagged as having no independent check (which is where careful manual review should be focused first). Any disagreement between the declaration and what the CAS can parse is flagged for the operator to adjudicate.
+### Concurrency safety
+
+Concept-gap status transitions use a compare-and-swap guard: `UPDATE ... WHERE id = $1 AND status = $3`. Without the guard, two concurrent transitions on the same gap could silently overwrite each other. When the guard reports a conflict (no row matched), the operation throws rather than returning a fabricated success view.
+
+`listConceptGaps` treats an explicit `statuses: []` filter as match-nothing, distinct from an omitted filter. An explicitly empty array asking for no results should not return all gaps.
+
+## Assignment brief answer contracts
+
+A **brief** is the set of facts an Analyst needs about an assignment at session time. It records what the correct answers are and how they relate to one another — not how to teach.
+
+### Accepted vs. unfinished answers
+
+A brief's answer field distinguishes two kinds of "technically right":
+
+- **`accepted` forms** — mathematically equivalent to the canonical answer (e.g. `2/4` for `1/2`). An accepted match records no evidence.
+- **`unfinished` forms** — correct but missing a required step (e.g. one root where the problem has two). An unfinished match records, at most, a pattern observation (a residual-step habit), never a misconception.
+
+Collapsing this into one judgment risks writing "doesn't understand the concept" into an append-only evidence log for a student who was simply one step short. The distinction generalizes: in Physics, wrong units is a misconception; wrong significant figures is "unfinished" — same surface shape, opposite evidence weight.
+
+### CAS-checkability per answer
+
+Not every answer can be checked by a computer algebra system — `AD ⊥ BC` cannot; `x = ±√2` can. Ingestion declares an `answerKind` per answer (value / expression / set / inequality are CAS-eligible; geometric-relation / description / proof are not).
+
+At session time the Analyst reads `kind` as data, not as an instruction to invoke a tool. An expression-shaped answer tells it a check is possible; a words-shaped answer tells it none is. The brief states what the answer is; each pedagogy's own logic decides what to do with that shape.
 
 ### Problem dependencies
 
-A brief problem can declare `dependsOn`: the earlier problems whose results it consumes. This serves two purposes. First, it prevents a false-positive misconception: if problem 3's error is entirely inherited from a wrong answer to problem 2, recording a fresh misconception against problem 3 double-counts the same underlying belief. Second, it shapes the review session's pedagogy — the reviewing Guide can ask "do you think your answer to problem 3 was right?" rather than walking problems in page order, which creates an opportunity for the student to self-diagnose the dependency chain. That self-correction is stronger evidence than being told directly.
+A brief problem can declare `dependsOn`: the earlier problems whose results it consumes. This prevents double-counting: if problem 3's error is inherited from a wrong problem 2, there is no new misconception at problem 3.
 
-### The answer key can still be wrong
+It also drives the review session's sequence — the Guide can ask "do you think your answer to problem 3 was right?" rather than walking problems in page order. A self-correction under that nudge is stronger evidence than being corrected directly.
 
-Even after double-solve-with-CAS verification and operator review of each worked solution, a brief's answer key can still contain an error. If this happens during a live session, there is currently no channel for the session to report it back — a student who answered correctly gets recorded as incorrect in the append-only evidence log, and the mismatch is lost when the session ends.
+### Known risk: wrong answer key
 
-This is a known gap. It is deliberately deferred rather than solved now, because the ingestion verification workflow exists precisely to make it rare, and the risk is treated as residual rather than primary. Solving it would require genuine engine work — a table, a driven port, and MCP tools — in the same shape as the concept-gap channel described in the catalog lifecycle page, but for answer-key errors rather than missing concept nodes. For now, the assumption is that thorough operator review at ingestion time catches most errors before a live session ever sees them.
+Even after double-solve-with-CAS verification and operator review, a brief's answer key can still be wrong. Today there is no channel for a session to report this back. A student who answered correctly gets recorded as wrong in an append-only evidence log, and the mismatch is lost when the session ends.
 
-## Two load-bearing properties of the anchor
+This is a known backlog item. The natural fix would mirror the concept-gap channel (a session-filed row with a revisable operator verdict). It is deferred because the ingestion workflow makes it rare and the risk is treated as residual.
 
-These two constraints on the study anchor are easy to weaken and important to preserve:
+## Operator evidence audit
 
-**Anchor membership comes from the study material, not from a graph query.** The anchor is authored by a human reading the material and deciding which concepts are relevant. The `match_nodes` lookup that helps a preparer find an existing slug answers "what is this concept already called?" — it never answers "what concepts belong in this unit?" If those two questions collapsed into one, the anchor would silently start reflecting the shape of the graph rather than the shape of the material.
+The operator can verify a belief by reading the evidence rows behind it. The engine provides one read that returns a student's evidence rows narrowed by the same filter type the belief read already uses — no new schema, no new port. Filtering and slug mapping happen in the orchestration layer, using the value already in hand from finding the belief.
 
-**There is no anchor-listing operation on any surface.** An anchor is read by an id the caller was given; nothing returns all anchors or searches them. Listing anchors would let a small number of calls reassemble an inventory of the concept graph that the engine deliberately keeps invisible.
+The audit is kept off the student surface. A session has no business reviewing its own scaffolding history, and raw payloads would invite a model to reason about how it was previously coached.
+
+## The ingestion workflow
+
+Drafting an assignment brief's per-problem concept attribution cannot happen in one pass. The operator first works every problem and drafts the brief with concepts named as free text — which concepts are needed is only known after every problem has been worked. Then the operator reconciles those free-text terms against the graph (via `match_nodes`), seeds any genuinely new nodes through the before-the-write approval gate, and finally rewrites the brief's concept references as confirmed, current slugs.
+
+The same authoring pass is split into two ingestion steps by the seeding gate sitting between them: draft-with-free-text, then seed, then attach-confirmed-slugs. This is a consequence of the graph's approval-before-write discipline, not an independent choice.

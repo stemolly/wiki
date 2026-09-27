@@ -1,53 +1,61 @@
 ---
 title: Observability & Resilience
-description: Schema-checked Pino logging, explicit RequestContext, single error envelope with LLM escalation tiers, and in-process worker fault-tolerance.
+description: How Stemolly logs, traces, handles errors, tolerates worker faults, and meters LLM calls — the five interlocking systems that keep the backend visible and safe.
 ---
 
-Stemolly's observability and resilience strategy is built on a few consistent principles: every log line, every error response, and every failure path follows a known, enforced contract. This page explains how those contracts work and why they were designed the way they are.
+Every request in Stemolly carries a trace ID from entry to exit. Every log line is schema-validated. Every error surfaces in one predictable shape. Every job failure is caught before it can kill the server. And every LLM call is metered — even the ones that time out. These five systems are designed together: the same `RequestContext` that threads a trace ID through function calls also feeds the error envelope, the logger, and the metering observer.
 
 ## Structured Logging
 
-Every log line in the backend goes through a single shared logger module at `server/src/logger/index.ts`, built on [Pino](https://getpino.io/) via Fastify's built-in logger integration. All log lines must carry five required fields:
+All log output flows through one shared module: `server/src/logger/index.ts`, built on [Pino](https://getpino.io/) via Fastify's built-in logger integration. **`console.*` is banned everywhere else** — enforced by an ESLint `no-console` rule — so there is exactly one path from code to a log line.
 
-| Field | Purpose |
-|---|---|
-| `timestamp` | ISO-8601 string |
-| `level` | String label (`"info"`, `"warn"`, `"error"`) |
-| `module` | Which module emitted this line |
-| `event` | A stable, machine-readable event name |
-| `traceId` | Ties all lines from one request together |
+Every log line must carry these fields:
 
-Six additional fields are optional: `sessionId`, `jobId`, `durationMs`, `errorCode`, `statusCode`, and `reqId`. `statusCode` is merged in by the error handler. `reqId` is auto-bound by Fastify onto every `request.log` line — app code cannot opt out of it per call.
+| Field | Required | Notes |
+|---|---|---|
+| `timestamp` | ✅ | ISO string |
+| `level` | ✅ | String label (`"info"`, `"warn"`, …) |
+| `module` | ✅ | Which subsystem emitted the line |
+| `event` | ✅ | What happened |
+| `traceId` | ✅ | From the request's `RequestContext` |
+| `sessionId` | optional | |
+| `jobId` | optional | |
+| `durationMs` | optional | |
+| `errorCode` | optional | |
+| `statusCode` | optional | Merged in by the error handler |
+| `reqId` | optional | Auto-bound by Fastify; cannot be opted out per call |
 
-**Privacy is enforced at the schema level.** Fields shaped like content — `message`, `transcript`, `prompt`, `content` — are rejected by a unit test that checks known content-shaped keys. Transcript text, student names, and email addresses must never appear in logs; this is checked automatically, not left to each developer to remember.
+**Forbidden fields:** `message`, `transcript`, `prompt`, `content`, and any key that could carry transcript or student PII. A schema unit test rejects these by name — a blocklist, not an allowlist, so call sites do not need to remember it.
 
-`console.*` is banned everywhere outside `logger/**` by an ESLint `no-console` rule. This is the lint half of the discipline; the schema test is the runtime half.
+### The pino configuration trap
 
-### Why Pino needs explicit configuration
+Pino's defaults do not satisfy the schema above. Out of the box, Pino emits `level` as a **number** (e.g. `30`), the timestamp as an **epoch integer** under a `time` key, and auto-injects `pid` and `hostname`. A `.strict()` Zod schema expecting `level` as a string, a `timestamp` key, and no extra fields rejects every line the default logger produces.
 
-Pino's defaults do not match the schema. Out of the box, Pino emits `level` as a **number** (`30` for info, not `"info"`), timestamps as an **epoch integer** under a key called `time` (not `timestamp`), and injects `pid` and `hostname` — two keys the `.strict()` schema rejects as unlisted.
-
-Left at defaults, `createLogger()` could not produce a single log line that passed the schema. The mismatch was invisible because the schema tests fed hand-built objects and an in-memory test logger, never the real logger's actual output. It was caught by an independent review pass, not by the test suite.
-
-`createLogger()` must therefore set **three specific options**. Removing any one of them breaks schema conformance for every log line in the system:
+`createLogger()` must configure three options explicitly — removing any one breaks schema conformance for every log line:
 
 ```ts
 pino({
-  base: null,                                                    // drops pid and hostname
+  base: null,                                                     // drops pid and hostname
   timestamp: () => `,"timestamp":"${new Date().toISOString()}"`, // ISO string, right key
-  formatters: { level: (label) => ({ level: label }) }          // string, not number
+  formatters: { level: (label) => ({ level: label }) },          // string, not number
 })
 ```
 
-A permanent regression guard in `server/src/logger/schema.test.ts` verifies these. Deliberately removing `base: null` causes it to fail with `Unrecognized keys: "pid", "hostname"`.
+This mismatch went undetected because the original tests fed hand-built objects to the schema, never the real logger's output. It was caught by an independent review pass.
 
-:::note[Why a subprocess?]
-Pino writes directly to a file descriptor via [sonic-boom](https://github.com/mcollina/sonic-boom), bypassing `process.stdout.write`. Monkey-patching stdout captures nothing. Any test that must assert on the **real** logger's output must spawn a child process (`execFileSync` running `tsx`), run `createLogger()`, and parse its stdout. An in-process test that builds its own pino instance validates a *different* logger — which is exactly what let the schema and the real logger drift apart silently.
+### Testing the real logger requires a subprocess
+
+Pino writes directly to a file descriptor via `sonic-boom`, which bypasses `process.stdout.write` entirely. Monkey-patching stdout captures nothing.
+
+The permanent regression guard in `server/src/logger/schema.test.ts` handles this by spawning a child process — running a small script through `tsx` — and parsing its stdout. Deliberately removing `base: null` makes the guard fail with `Unrecognized keys: "pid", "hostname"`.
+
+:::caution
+Any test that builds its own in-memory pino instance to avoid this is validating the schema against a differently-configured logger. The two can drift apart silently — that is exactly how the original mismatch survived.
 :::
 
-## Request Context and TraceId Propagation
+## TraceId and RequestContext
 
-A `traceId` identifies every request through its entire lifecycle — across sync code, async steps, and job boundaries. Rather than using Node's `AsyncLocalStorage` to make the `traceId` implicitly available anywhere, Stemolly threads it explicitly.
+A `traceId` identifies every request through its entire lifecycle — across sync code, async steps, and job boundaries. Rather than using Node's `AsyncLocalStorage` to make the ID implicitly available anywhere, Stemolly threads it explicitly through call arguments.
 
 Each request creates a `RequestContext` object:
 
@@ -58,13 +66,15 @@ interface RequestContext {
 }
 ```
 
-This object is passed as a parameter through every function that needs it. The `traceId` is also the value that appears in error response envelopes, tying log lines to error responses for the same request.
+This is passed as a parameter through every function that needs it, across the sync-turn → async-checkpoint boundary. The same `traceId` surfaces in every log line emitted by that request and in the error envelope if the request fails — tying log lines to error responses so you can look one up from the other.
 
-**Why not `AsyncLocalStorage`?** Explicit passing keeps propagation visible — you can always see where context flows. `AsyncLocalStorage` has a known footgun: it silently loses context across certain async boundaries, producing log lines without a `traceId` in ways that are hard to debug. The cost is one extra parameter; the benefit is that a missing `traceId` is a visible type error, not a runtime mystery.
+**Why not `AsyncLocalStorage`?** ALS has a known footgun: it silently loses context across certain async boundaries, producing log lines without a `traceId` in ways that are hard to debug. Explicit passing makes propagation visible in the call graph — a missing `traceId` is a visible type error, not a runtime mystery. The cost is one extra parameter in call chains.
 
-## Error Responses
+## Error Envelope and LLM Failure Tiers
 
-All error responses across the API use one envelope shape, defined in the shared contracts package:
+### One envelope everywhere
+
+All error responses from the API conform to one shape, defined in the shared contracts package:
 
 ```json
 {
@@ -77,13 +87,13 @@ All error responses across the API use one envelope shape, defined in the shared
 }
 ```
 
-- **HTTP status** carries the broad category (4xx vs 5xx). `code` carries the specific, stable, machine-readable reason.
-- **User-facing text** is never sent as server prose. The frontend localizes from `code`, keeping the language boundary clean.
-- **Domain modules throw typed errors** and never touch HTTP. A **single** Fastify `setErrorHandler` is the only place that converts errors into HTTP responses. Fastify's own validation failures (`FST_ERR_VALIDATION`) also flow through this one handler, mapped to `ValidationError` — there is no second code path for validation errors.
+- **HTTP status** carries the broad category (4xx vs 5xx). **`code`** carries the specific, machine-readable reason.
+- **User-facing text** is never sent as server prose — the frontend localizes from `code`, keeping the language boundary clean.
+- **Domain modules throw typed errors** and never touch HTTP. A **single** Fastify `setErrorHandler` is the only place error bodies are built — including for Fastify's own validation failures (`FST_ERR_VALIDATION`), which are mapped to `ValidationError` so they follow the same envelope.
 
-### LLM and Provider Failure Handling
+### LLM failure tiers
 
-LLM and provider failures are treated as first-class expected conditions, not exceptional crashes. The gateway classifies each failure and scrubs PII before it surfaces. When an LLM call fails, the system works through a defined escalation:
+LLM and provider failures are treated as expected conditions. The gateway classifies each failure and scrubs PII before it surfaces anywhere. When an LLM call fails, the system works through a defined escalation:
 
 ```mermaid
 flowchart TD
@@ -93,32 +103,59 @@ flowchart TD
     D --> E["Student can retry — never dead-ended"]
 
     F["Malformed Expert output"] --> G["Bounded repair-retry"]
-    G -->|"still malformed"| H["Skip and flag — never write partial evidence"]
+    G -->|"still malformed"| H["Skip and flag<br/>never write partial evidence"]
 ```
 
 Cross-provider fallback is **on by default for the Interface** (the conversational turn) and **off by default for the Expert** (the evidence-writing step, where correctness matters more than availability).
 
 ## Fire-and-Forget Metering
 
-The LLM module emits a `'llm.response'` event when a model call completes. A composed observer listens for this event, sums token counts, computes cost from the tier rate, and calls `metering.recordLlmCall(...)` **un-awaited** — deliberately fire-and-forget so a slow or failing billing write never blocks a student's turn.
+### How it works
 
-A bare `void` on a rejecting promise still surfaces at the **process level** as an unhandled rejection. This was not theoretical: when the real provider and metering wiring was composed against a unit-test environment with no live database, the metering write rejected asynchronously and **crashed the entire `test:unit` script** — every assertion passing, the process dead.
+The `llm` module does not write metering rows itself. A composed observer listens for `'llm.response'` events emitted during each model call, then:
 
-The rule this established — **fire-and-forget must never mean fire-and-never-find-out** — requires two steps at the call site:
+1. Sums `usage.inputTokens + usage.outputTokens` for total tokens.
+2. Computes cost from the tier rate.
+3. Measures `latencyMs` from the per-attempt start time.
+4. Calls `metering.recordLlmCall(...)` — **un-awaited**.
+
+If the LLM call timed out and a late response still arrives, the observer records it with `outcome: 'discarded'` so the token cost is visible even for abandoned calls.
+
+`recordLlmCall` shapes the call into a row in `metering.llm_calls`:
+
+| Column | Source |
+|---|---|
+| `prompt_v` | `promptId + promptVersion` collapsed into one string |
+| `role` | Mapped from `agentRole` |
+| `model` | From the response, or `null` if absent |
+| `outcome` | `completed` or `discarded` |
+| `tokens`, `cost`, `latencyMs` | Computed by the observer |
+| `id`, `created_at` | DB defaults |
+
+### Catch or crash
+
+Metering writes are deliberately un-awaited — a slow or failing billing write must never block a student's turn. But an un-awaited rejection still surfaces at the **process level** as an unhandled rejection.
+
+This was not theoretical: when the real provider and metering wiring was composed against a unit-test environment with no live database, the metering write rejected asynchronously and **crashed the entire `test:unit` script** — every assertion passing, the process dead.
+
+The fix requires both halves:
 
 ```ts
-// Step 1: always .catch() — a rejecting void is a process-level crash
 metering.recordLlmCall(...).catch((err) => {
-  // Step 2: always log what you swallow — silence means billing data disappears with no signal
+  // Half 1: .catch() — a rejecting void is a process-level crash
+  // Half 2: log it — silence means billing data disappears with no signal
   logger?.warn({ module: 'llm', event: 'metering.record_failed', purpose, agentRole });
 });
 ```
 
-Swallowing without logging means billing data disappears silently. The warn log is the second, equally required, half of the fix.
+:::caution
+"Fire and forget" must never mean "fire and never find out." Catch at the source, and log what you swallow.
+:::
 
-## In-Process Worker Fault Tolerance
 
-The job worker runs async jobs (scoring, evidence writing) inside the **same Node.js process** as the HTTP server. A badly-failing job can, in the worst case, take down both. Rather than extracting the worker into a separate process, the strategy makes the blast radius **explicit and bounded**.
+## In-Process Worker Fault-Tolerance
+
+The job worker runs inside the **same Node.js process** as the HTTP server. A badly-failing job can, in the worst case, take down the HTTP server too. Rather than splitting the worker out into its own process, the strategy makes this blast radius explicit and bounded.
 
 The governing philosophy:
 
@@ -128,17 +165,17 @@ The governing philosophy:
 
 ```mermaid
 flowchart TD
-  Supervisor["Process Supervisor<br/>(auto-restart)"]
-  Process["Node.js Process"]
-  HTTP["HTTP Server (Fastify)"]
-  Worker["Job Worker (in-process)"]
-  EvidenceLog["Evidence Log<br/>(append-only, transactional)"]
+    Supervisor["Process Supervisor<br/>(auto-restart)"]
+    Process["Node.js Process"]
+    HTTP["HTTP Server"]
+    Worker["Job Worker"]
+    EvidenceLog[("Evidence Log<br/>append-only, transactional")]
 
-  Supervisor -->|"monitors & restarts"| Process
-  Process --> HTTP
-  Process --> Worker
-  Worker -->|"protected writes"| EvidenceLog
-  Worker -->|"errors become job failures,<br/>not process crashes"| Worker
+    Supervisor -->|"monitors & restarts"| Process
+    Process --> HTTP
+    Process --> Worker
+    Worker -->|"protected writes"| EvidenceLog
+    Worker -->|"errors become job failures,<br/>not process crashes"| Worker
 ```
 
 **Safety rails in place:**
@@ -148,4 +185,8 @@ flowchart TD
 - Process-level `uncaughtException` and `unhandledRejection` handlers log and exit cleanly.
 - The process runs under a supervisor with auto-restart; jobs are durable, so a crash resumes in-flight work.
 
-Data safety across a crash is strong. Availability has a single-process ceiling that is accepted at cohort scale; extracting the worker to its own process is the documented next step when the team outgrows it.
+Data safety across a crash is strong. Availability has a single-process ceiling that is accepted at cohort scale. Extracting the worker to its own process is the documented next step when scale demands it.
+
+:::caution
+The in-process design means a badly-failing job can affect HTTP availability. The supervisor's restart policy and the idempotent evidence log bound the damage — not process isolation.
+:::

@@ -1,81 +1,47 @@
 ---
-title: Khả năng quan sát và khả năng chống chịu
-description: Ghi log Pino có kiểm tra schema, lần vết RequestContext tường minh, một error envelope duy nhất với các tầng leo thang cho LLM, và khả năng chịu lỗi của worker trong cùng tiến trình.
+title: Observability (khả năng quan sát) và resilience (khả năng phục hồi)
+description: Ghi log Pino được kiểm tra bằng schema, RequestContext tường minh, một error envelope duy nhất với các tầng leo thang cho LLM, và khả năng chịu lỗi của worker trong cùng tiến trình.
 ---
 
-Cách Stemolly tiếp cận observability (khả năng quan sát) và resilience (khả năng chống chịu) dựa trên hai trụ cột bổ trợ lẫn nhau. Thứ nhất là structured, schema-enforced logging (ghi log có cấu trúc, được schema ràng buộc), giúp mọi request đều truy vết được — từ byte HTTP đầu tiên đến token LLM cuối cùng — bằng một bộ trường cố định đi cùng một đối tượng context tường minh. Thứ hai là chiến lược fault-tolerance (khả năng chịu lỗi) theo nhiều lớp, tách rõ những gì tuyệt đối không được mất (evidence log) khỏi những gì có thể suy giảm an toàn, và biến ranh giới đó thành điều được ép buộc bằng code thay vì chỉ là quy ước.
+Cách Stemolly xây dựng observability và resilience dựa trên bốn mảnh ghép gắn chặt với nhau: một logging pipeline (luồng ghi log) có hình dạng được ràng buộc nghiêm ngặt, một trace context (ngữ cảnh lần vết) được truyền tường minh, một error envelope (bao lỗi) duy nhất với cơ chế fallback (dự phòng) theo tầng cho LLM, và một chiến lược chịu lỗi có giới hạn cho background jobs (tác vụ nền). Trang này giải thích từng mảnh ghép và cách chúng kết nối với nhau.
 
----
+## Structured logging (ghi log có cấu trúc) với bộ trường được kiểm tra bằng schema
 
-## Ghi log có cấu trúc: hợp đồng trường dữ liệu
+Mọi đầu ra log đều đi qua một module dùng chung duy nhất: `server/src/logger/index.ts`. Module này bọc Pino thông qua cơ chế tích hợp logger có sẵn của Fastify. Mỗi dòng log **phải** mang năm trường bắt buộc:
 
-Mọi dòng log trong hệ thống đều đi qua một logger dùng chung — `server/src/logger/index.ts`, chạy trên [Pino](https://getpino.io/) và tích hợp với logger có sẵn của Fastify. Điểm vào duy nhất này buộc toàn bộ hệ thống phải dùng cùng một bộ trường cố định.
-
-**Bắt buộc trên mọi dòng:**
-
-| Field | Mục đích |
+| Trường | Mục đích |
 |---|---|
-| `timestamp` | Chuỗi ISO-8601 — thời điểm sự việc xảy ra |
-| `level` | Nhãn chuỗi (`"info"`, `"warn"`, `"error"`) |
-| `module` | Module nào phát ra dòng này |
-| `event` | Tên sự kiện ổn định, máy đọc được |
-| `traceId` | Gắn tất cả các dòng của một request lại với nhau |
+| `timestamp` | Chuỗi ISO-8601 |
+| `level` | Nhãn chuỗi (`info`, `warn`, …) |
+| `module` | Tên module nguồn |
+| `event` | Slug sự kiện để máy đọc được |
+| `traceId` | Liên kết dòng này với một request hoặc job |
 
-**Trường tùy chọn:** `sessionId`, `jobId`, `durationMs`, `errorCode`, `statusCode`, `reqId`.
-`statusCode` được error handler trộn vào. `reqId` được Fastify tự động gắn vào mọi dòng `request.log` — code ứng dụng không thể bỏ nó đi ở từng lần gọi.
+Sáu trường tùy chọn — `sessionId`, `jobId`, `durationMs`, `errorCode`, `statusCode`, và `reqId` — được phép xuất hiện, ngoài ra không có trường nào khác. `reqId` được Fastify tự động gắn vào mọi dòng `request.log`; `statusCode` được error handler trộn thêm vào. Nội dung transcript, nội dung prompt và tên học sinh đều **bị cấm**; điều này được ép buộc bằng một unit test của schema, test này sẽ từ chối các khóa có hình dạng nội dung đã biết (`message`, `transcript`, `prompt`, `content`).
 
-**Trường bị cấm:** mọi trường mang PII (thông tin nhận dạng cá nhân) hoặc nội dung — `message`, `transcript`, `prompt`, `content`, cùng các khóa có hình dạng tương tự. Schema chủ động từ chối các khóa nội dung đã biết thay vì trông chờ từng call site phải nhớ một danh sách cho phép.
+`console.*` bị cấm ở mọi nơi ngoài `logger/**` thông qua một rule ESLint. Sự kết hợp giữa schema ràng buộc bộ trường và lệnh cấm ở tầng lint bảo đảm rằng mọi câu lệnh log trong codebase đều có cùng một hình dạng.
 
-Bộ trường này được ép bằng một schema [Zod](https://zod.dev/) `.strict()` (`LogFieldsSchema`) và có unit test để kiểm tra theo đúng schema đó. Đi kèm là một rule ESLint (`no-console`) cấm `console.*` ở mọi nơi ngoài module `logger/`. Rule này là nửa kiểm soát ở tầng lint; bài test schema là nửa còn lại ở tầng runtime.
+### Vì sao logger cần cấu hình tường minh
 
----
+Thiết lập mặc định của Pino không đáp ứng schema này. Theo mặc định, Pino xuất `level` dưới dạng số (`30`), ghi timestamp dưới dạng số nguyên epoch trong khóa `time`, và thêm `pid` cùng `hostname` vào mọi dòng. Một schema Zod `.strict()` mong đợi `level` là chuỗi, có khóa `timestamp`, và không chấp nhận trường thừa sẽ từ chối mọi dòng mà logger mặc định tạo ra.
 
-## Cấu hình `createLogger()` cho đúng
-
-Thiết lập mặc định của Pino **không** đáp ứng `LogFieldsSchema`. Ở trạng thái mặc định, Pino:
-
-- xuất `level` dưới dạng **số** (`30` cho info, không phải `"info"`)
-- ghi timestamp dưới dạng **số nguyên epoch** ở khóa `time` (không phải `timestamp`)
-- tự động chèn `pid` và `hostname` — hai khóa mà `.strict()` sẽ từ chối vì không nằm trong danh sách
-
-Nếu giữ nguyên mặc định, `createLogger()` sẽ không thể tạo ra dù chỉ một dòng log hợp lệ theo schema. Lỗ hổng này đã âm thầm tồn tại một thời gian vì các bài test schema lại đưa vào những object dựng tay và một logger trong bộ nhớ được cấu hình riêng — chứ không phải đầu ra thật của logger đang chạy ngoài thực tế. Nó được phát hiện nhờ một lượt review độc lập, không phải nhờ test suite.
-
-Vì vậy, `createLogger()` bắt buộc phải đặt **ba tùy chọn cụ thể**. Chỉ cần bỏ đi một trong ba là mọi dòng log trong hệ thống đều sẽ sai schema:
+Vì vậy `createLogger()` phải đặt ba tùy chọn mang tính nền tảng:
 
 ```ts
-pino({
-  base: null,                           // drops pid and hostname
-  timestamp: () => `,"timestamp":"${new Date().toISOString()}"`,  // ISO string under the right key
-  formatters: {
-    level: (label) => ({ level: label }) // string label, not numeric level
-  },
-  // ...
-})
+{
+  base: null,                          // drops pid and hostname
+  timestamp: () => `,"timestamp":"${new Date().toISOString()}"`,
+  formatters: { level: label => ({ level: label }) },
+}
 ```
 
-Đây là các tùy chọn **mang tính sống còn**, không phải lựa chọn phong cách. Một lớp chặn hồi quy thường trực trong `server/src/logger/schema.test.ts` kiểm tra chính xác điều đó — phần tiếp theo giải thích guard này hoạt động ra sao.
+Chỉ cần bỏ một trong ba tùy chọn này là mọi dòng log trong hệ thống sẽ không còn đúng schema.
 
----
+Bộ test ban đầu đã không phát hiện ra sự lệch nhau này vì các test đó đưa vào schema những object mẫu dựng tay, chứ không phải đầu ra thật của logger. Lý do là Pino ghi trực tiếp vào file descriptor thông qua transport `sonic-boom`, nên nó bỏ qua hoàn toàn `process.stdout.write`. Monkey-patch stdout sẽ không bắt được gì. Cách duy nhất để quan sát đầu ra thật của logger là **spawn một child process (tiến trình con)** — chạy một script nhỏ qua `tsx` rồi phân tích stdout của nó. Lớp chặn hồi quy hiện có trong `server/src/logger/schema.test.ts` làm đúng việc đó, và nếu cố tình bỏ `base: null` thì test sẽ thất bại với lỗi `Unrecognized keys: "pid", "hostname"`.
 
-## Kiểm thử logger thật: vì sao phải dùng subprocess
+## Trace context: truyền tường minh thay vì AsyncLocalStorage
 
-Pino ghi log ra file descriptor thông qua thư viện [sonic-boom](https://github.com/mcollina/sonic-boom), nên nó đi vòng qua `process.stdout.write` hoàn toàn. Monkey-patch hoặc spy vào `process.stdout` sẽ không bắt được gì. `createLogger()` cũng không cho phép tiêm một destination stream tùy ý.
-
-Điều này có nghĩa là bất kỳ bài test nào muốn khẳng định **đầu ra thật của logger đang chạy thật** đều không thể chọn đường tắt trong cùng tiến trình. Bài test bắt buộc phải:
-
-1. Viết một script nhỏ gọi `createLogger()` rồi phát ra một dòng log.
-2. Chạy script đó như một child process (ví dụ `execFileSync` chạy `tsx`).
-3. Phân tích stdout của nó và kiểm tra lại bằng `LogFieldsSchema`.
-
-Đây chính là cách lớp chặn hồi quy được thêm vào sau vụ lệch nhau giữa schema và logger vận hành. Nếu cố tình bỏ `base: null` khỏi `createLogger()`, guard sẽ hỏng với lỗi `Unrecognized keys: "pid", "hostname"` — khoảng hở nay đã được khép lại và bảo vệ.
-
-Bài học sâu hơn ở đây là: một bài test trong cùng tiến trình, tự dựng instance pino riêng và trỏ nó vào memory stream, thực chất đang kiểm tra một logger *khác*, chứ không phải logger production. Hai thứ đó hoàn toàn có thể trôi lệch khỏi nhau mà không ai nhận ra. Muốn kiểm tra đúng cái đang chạy thật, bạn cần một cơ chế khác.
-
----
-
-## Truyền `traceId`: `RequestContext`
-
-`traceId` của một request (cùng logger theo request, vốn đã có sẵn `traceId`) được mang đi trong một object duy nhất:
+Mỗi request hoặc job gói trace identifier và logger của nó vào cùng một object:
 
 ```ts
 interface RequestContext {
@@ -84,17 +50,154 @@ interface RequestContext {
 }
 ```
 
-`RequestContext` này được luồn **tường minh** qua các tham số hàm — từ HTTP handler, qua sync-turn, rồi vào mọi checkpoint bất đồng bộ. Nó **không** được cất trong `AsyncLocalStorage` (ALS) của Node.
+`RequestContext` này được luồn tường minh như một đối số hàm qua mọi lời gọi cần dùng đến nó — kể cả khi đi qua ranh giới sync-turn → async-checkpoint. Nó **không** được lưu trong `AsyncLocalStorage` của Node để rồi đọc ra một cách ngầm định.
 
-Đây là một quyết định có chủ ý. Luồn tham số tường minh khiến đường đi của context lộ rõ trong code; hàm nào cần `traceId` thì phải khai báo nó trong tham số. ALS che khuất luồng dữ liệu này, và còn có một kiểu lỗi đã biết: context có thể âm thầm rơi mất khi đi qua một số ranh giới bất đồng bộ nhất định (một số API dựa trên callback, listener của `EventEmitter`, và các mẫu tương tự có trước hợp đồng ALS). Cái giá phải trả là phải chuyền thêm một tham số dọc theo chuỗi lời gọi; đổi lại, việc thiếu `traceId` sẽ lộ ra thành lỗi kiểu ở thời điểm biên dịch, thay vì một bí ẩn khi chạy.
+Lý do là tính minh bạch. AsyncLocalStorage có thể âm thầm làm rơi context qua một số ranh giới bất đồng bộ, và việc lan truyền của nó không hiện ra trong call graph. Truyền tường minh khiến mỗi chuỗi lời gọi phải nhận thêm một tham số, nhưng bù lại đường đi của context luôn nhìn thấy được và không thể vô tình đánh rơi. `traceId` xuất hiện trong mọi dòng log và mọi bao phản hồi lỗi đều đến từ cùng `RequestContext` này.
 
-Error envelope được mô tả bên dưới cũng tự điền trường `traceId` từ chính context đã được truyền theo cách này.
+## Một error envelope, một error handler
 
----
+Mọi phản hồi lỗi từ server đều tuân theo một bao duy nhất được định nghĩa trong gói contracts:
 
-## Một error envelope duy nhất
+```json
+{
+  "error": {
+    "code": "RESOURCE_NOT_FOUND",
+    "message": "Resource not found",
+    "traceId": "abc-123",
+    "details": {}
+  }
+}
+```
 
-Mọi phản hồi lỗi từ server đều dùng chung một shape được định nghĩa trong gói contracts:
+- **HTTP status** mang nhóm phân loại rộng (4xx so với 5xx).
+- **`code`** là chuỗi ổn định, máy đọc được, để frontend ánh xạ sang văn bản dành cho người dùng. Server không bao giờ gửi văn xuôi đã bản địa hóa — điều này giữ đúng ranh giới hai ngôn ngữ.
+- **`traceId`** đến từ `RequestContext` đã mô tả ở trên.
+
+Các module miền nghiệp vụ ném typed error và không đụng vào HTTP. Một `setErrorHandler` duy nhất của Fastify là nơi duy nhất tạo ra body lỗi — kể cả các lỗi validate của chính Fastify (`FST_ERR_VALIDATION`), vốn được ánh xạ sang `ValidationError` để đi theo đúng bao lỗi chung như các lỗi do ứng dụng ném ra.
+
+### Lỗi LLM và provider là trường hợp hạng nhất
+
+Lỗi LLM không phải là ngoại lệ bất ngờ ở mép hệ thống — chúng được phân loại và xử lý theo một thứ tự leo thang cố định:
+
+```mermaid
+flowchart LR
+    A["LLM call fails"] --> B["Retry same tier"]
+    B --> C{"Still failing?"}
+    C -- no --> D["Success"]
+    C -- yes --> E["Fall back one tier"]
+    E --> F{"Still failing?"}
+    F -- no --> D
+    F -- yes --> G["Soft-fail with retry affordance"]
+```
+
+Fallback chéo provider được bật mặc định cho tier Interface và tắt mặc định cho tier Expert. Đầu ra Expert bị lỗi định dạng sẽ được repair-retry có giới hạn; sau đó nó bị bỏ qua và gắn cờ — tuyệt đối không bao giờ được ghi thành bằng chứng dở dang. Mọi lỗi provider đều được loại bỏ PII trong gateway trước khi chạm tới bất kỳ dòng log hay phản hồi lỗi nào.
+
+## Fire-and-forget telemetry (telemetry gửi đi không chờ): bắt lỗi nếu không sẽ sập
+
+Module `llm` không tự ghi các dòng metering. Một composed observer lắng nghe sự kiện `'llm.response'`, tính chi phí token từ mức giá của tier, rồi gọi `metering.recordLlmCall(...)` **mà không `await`**. Đây là chủ ý: một lần ghi billing chậm hoặc lỗi không bao giờ được phép chặn hay phá vỡ lượt tương tác của học sinh.
+
+Một promise bị từ chối mà không `await` không đồng nghĩa với việc nó đã được xử lý. Nếu không có `.catch()` tường minh, lần ghi metering bị lỗi sẽ nổi lên ở cấp tiến trình như một unhandled rejection và làm sập tiến trình. Đây không phải chuyện giả định — trong các lượt chạy unit test không có cơ sở dữ liệu thật, lần ghi metering đã bị reject và làm sập toàn bộ script test dù mọi assertion đều đã qua.
+
+Cách sửa là đặt `.catch()` ngay tại đúng call site. Phần xử lý catch **phải** log ở mức `warn`:
+
+```ts
+metering.recordLlmCall(...)
+  .catch(err => logger?.warn({ module: 'llm', event: 'metering.record_failed', purpose, agentRole }));
+```
+
+Nguyên tắc ở đây là: *fire-and-forget là một lựa chọn chịu lỗi hợp lệ cho telemetry, nhưng tuyệt đối không được biến thành "gửi đi rồi chẳng bao giờ biết kết quả"*. Nếu bạn nuốt một lỗi, hãy log nó.
+
+## In-process worker fault-tolerance
+
+Các job nền chạy trong cùng tiến trình Node với HTTP server. Một job làm sập tiến trình cũng sẽ kéo HTTP server đi cùng. Chiến lược chịu lỗi ở đây chấp nhận trần giới hạn của mô hình dùng chung tiến trình ở quy mô cohort, và làm cho bán kính ảnh hưởng trở nên tường minh, có giới hạn, thay vì tách worker ra ngay.
+
+Triết lý này có ba phần:
+
+- **Bảo vệ thứ không thể thay thế.** Evidence log là append-only, idempotent, có transaction, và có sao lưu. Không bao giờ có bản ghi dở dang lọt xuống đĩa.
+- **Suy giảm với thứ có thể phục hồi.** Đường đi nhanh sẽ trả về một Report cũ nhưng vẫn hợp lệ, hoặc soft-fail kèm khả năng thử lại. Học sinh không bao giờ bị chặn ở ngõ cụt.
+- **Để lỗi dừng ở mức lỗi đã bắt, không để thành crash.** Mọi job handler đều được bọc để lỗi của chúng trở thành job failure, chứ không thành kẻ giết tiến trình. Jobs và các lời gọi LLM đều có giới hạn thời gian. Các handler cho `uncaughtException` và `unhandledRejection` sẽ log rồi thoát gọn gàng.
+
+Tiến trình chạy dưới một supervisor có chính sách tự khởi động lại. Khi có crash, các job bền vững sẽ tiếp tục chạy lại. Tính sẵn sàng vẫn có trần của mô hình một tiến trình; nếu quy mô đòi hỏi, việc tách worker sang tiến trình riêng là bước kích hoạt đã được ghi nhận từ trước.
+
+```mermaid
+flowchart TD
+    subgraph "Node Process"
+        HTTP["HTTP Server"]
+        Worker["Job Worker"]
+    end
+    Supervisor["Supervisor<br/>(auto-restart)"] --> HTTP
+    Supervisor --> Worker
+    Worker -->|"job failure<br/>(caught)"| Log["Log and continue"]
+    Worker -->|"uncaught exception"| ExitState["Log and exit<br/>(supervisor restarts)"]
+    Worker -->|"evidence write"| DB[("Evidence Log<br/>(append-only, idempotent)")]
+```
+
+:::caution
+Thiết kế trong cùng tiến trình có nghĩa là một job lỗi nặng, trong kịch bản xấu nhất, vẫn có thể ảnh hưởng đến tính sẵn sàng của HTTP. Chính sách tự khởi động lại của supervisor và evidence log có tính idempotent là thứ giới hạn thiệt hại — không phải khả năng cô lập.
+:::
+
+Chiến lược observability và resilience của Stemolly được xây trên một vài nguyên tắc nhất quán: mọi dòng log, mọi phản hồi lỗi, và mọi đường xử lý lỗi đều tuân theo một hợp đồng đã biết và được ép buộc. Trang này giải thích các hợp đồng đó vận hành ra sao và vì sao chúng được thiết kế như vậy.
+
+## Structured Logging
+
+Mọi dòng log trong backend đều đi qua một module logger dùng chung duy nhất tại `server/src/logger/index.ts`, được xây trên [Pino](https://getpino.io/) thông qua cơ chế tích hợp logger có sẵn của Fastify. Tất cả các dòng log đều phải mang năm trường bắt buộc:
+
+| Trường | Mục đích |
+|---|---|
+| `timestamp` | Chuỗi ISO-8601 |
+| `level` | Nhãn chuỗi (`"info"`, `"warn"`, `"error"`) |
+| `module` | Module nào phát ra dòng này |
+| `event` | Tên sự kiện ổn định, máy đọc được |
+| `traceId` | Gắn mọi dòng của cùng một request lại với nhau |
+
+Sáu trường bổ sung là tùy chọn: `sessionId`, `jobId`, `durationMs`, `errorCode`, `statusCode`, và `reqId`. `statusCode` được error handler trộn thêm vào. `reqId` được Fastify tự động gắn vào mọi dòng `request.log` — code ứng dụng không thể chọn bỏ nó ở từng lần gọi.
+
+**Quyền riêng tư được ép ở cấp schema.** Những trường có hình dạng nội dung — `message`, `transcript`, `prompt`, `content` — sẽ bị một unit test từ chối; test này kiểm tra các khóa nội dung đã biết. Văn bản transcript, tên học sinh và địa chỉ email tuyệt đối không được xuất hiện trong log; việc này được kiểm tra tự động, không để từng lập trình viên phải tự nhớ.
+
+`console.*` bị cấm ở mọi nơi ngoài `logger/**` bởi rule ESLint `no-console`. Đây là nửa kỷ luật ở tầng lint; bài test schema là nửa ở tầng runtime.
+
+### Vì sao Pino cần cấu hình tường minh
+
+Thiết lập mặc định của Pino không khớp với schema. Theo mặc định, Pino xuất `level` dưới dạng **số** (`30` cho info, không phải `"info"`), timestamp dưới dạng **số nguyên epoch** trong một khóa tên là `time` (không phải `timestamp`), và chèn thêm `pid` cùng `hostname` — hai khóa mà schema `.strict()` sẽ từ chối vì không có trong danh sách.
+
+Nếu để mặc định, `createLogger()` sẽ không thể tạo ra nổi một dòng log nào vượt qua được schema. Sự lệch nhau này đã bị che khuất vì các bài test schema dùng object dựng tay và một test logger trong bộ nhớ, chứ không bao giờ dùng đầu ra thật của logger. Nó được phát hiện nhờ một lượt review độc lập, không phải nhờ test suite.
+
+Vì vậy `createLogger()` bắt buộc phải đặt **ba tùy chọn cụ thể**. Chỉ cần bỏ đi một trong số đó là mọi dòng log trong hệ thống sẽ không còn đúng schema:
+
+```ts
+pino({
+  base: null,                                                    // drops pid and hostname
+  timestamp: () => `,"timestamp":"${new Date().toISOString()}"`, // ISO string, right key
+  formatters: { level: (label) => ({ level: label }) }          // string, not number
+})
+```
+
+Một lớp chặn hồi quy thường trực trong `server/src/logger/schema.test.ts` xác minh điều này. Nếu cố tình bỏ `base: null`, test sẽ thất bại với lỗi `Unrecognized keys: "pid", "hostname"`.
+
+:::note[Vì sao phải dùng subprocess?]
+Pino ghi trực tiếp vào file descriptor thông qua [sonic-boom](https://github.com/mcollina/sonic-boom), nên nó bỏ qua `process.stdout.write`. Monkey-patch stdout sẽ không bắt được gì. Bất kỳ bài test nào cần khẳng định đầu ra **thật** của logger đều phải spawn một child process (`execFileSync` chạy `tsx`), chạy `createLogger()`, rồi phân tích stdout của nó. Một bài test trong cùng tiến trình mà tự dựng instance pino riêng chỉ đang kiểm tra một logger *khác* — và chính điều đó đã khiến schema với logger thật có thể âm thầm trôi lệch khỏi nhau.
+:::
+
+## Request Context và lan truyền TraceId
+
+Một `traceId` nhận diện từng request trong toàn bộ vòng đời của nó — qua code đồng bộ, các bước bất đồng bộ và cả ranh giới job. Thay vì dùng `AsyncLocalStorage` của Node để làm cho `traceId` có thể được đọc ngầm ở bất kỳ đâu, Stemolly truyền nó theo cách tường minh.
+
+Mỗi request tạo ra một object `RequestContext`:
+
+```ts
+interface RequestContext {
+  traceId: string;
+  logger: Logger;
+}
+```
+
+Object này được truyền làm tham số qua mọi hàm cần đến nó. `traceId` cũng chính là giá trị xuất hiện trong bao phản hồi lỗi, nhờ đó gắn các dòng log với phản hồi lỗi của cùng một request.
+
+**Vì sao không dùng `AsyncLocalStorage`?** Truyền tường minh giữ cho đường đi của context luôn hiện rõ — bạn luôn thấy nó chảy qua đâu. `AsyncLocalStorage` có một footgun đã biết: nó có thể âm thầm làm rơi context ở một số ranh giới bất đồng bộ, từ đó tạo ra những dòng log không có `traceId` theo cách rất khó gỡ lỗi. Cái giá là thêm một tham số; lợi ích là thiếu `traceId` sẽ lộ ra thành lỗi kiểu nhìn thấy được, chứ không thành điều bí ẩn lúc runtime.
+
+## Phản hồi lỗi
+
+Mọi phản hồi lỗi trên toàn bộ API đều dùng chung một hình dạng bao, được định nghĩa trong gói contracts dùng chung:
 
 ```json
 {
@@ -102,75 +205,80 @@ Mọi phản hồi lỗi từ server đều dùng chung một shape được đ�
     "code": "SESSION_NOT_FOUND",
     "message": "Human-readable fallback",
     "traceId": "abc-123",
-    "details": { }
+    "details": {}
   }
 }
 ```
 
-Một vài quy tắc chi phối cấu trúc này:
+- **HTTP status** mang nhóm phân loại rộng (4xx so với 5xx). `code` mới là nơi chứa lý do cụ thể, ổn định và máy đọc được.
+- **Văn bản hướng tới người dùng** không bao giờ được gửi như văn xuôi từ server. Frontend sẽ bản địa hóa từ `code`, nhờ đó ranh giới ngôn ngữ luôn sạch.
+- **Các module miền nghiệp vụ ném typed error** và không đụng vào HTTP. Chỉ có **một** `setErrorHandler` của Fastify được phép chuyển lỗi thành phản hồi HTTP. Ngay cả lỗi validate của chính Fastify (`FST_ERR_VALIDATION`) cũng đi qua handler này và được ánh xạ sang `ValidationError` — không có đường code thứ hai cho lỗi validate.
 
-- **HTTP status** mang nhóm phân loại rộng (4xx hay 5xx). Trường `code` mới là nơi chứa lý do cụ thể, ổn định và máy đọc được.
-- **Văn bản hướng tới người dùng** không bao giờ được server gửi như văn xuôi tự do. Frontend sẽ bản địa hóa dựa trên `code`. Nhờ vậy server và UI luôn đồng bộ trên cả hai ngôn ngữ được hỗ trợ.
-- **Các module miền nghiệp vụ ném typed error** và không đụng trực tiếp vào HTTP. Chỉ có **một** `setErrorHandler` của Fastify được phép chuyển lỗi thành phản hồi HTTP. Ngay cả lỗi kiểm tra dữ liệu riêng của Fastify (`FST_ERR_VALIDATION`) cũng đi qua đúng handler này và được ánh xạ sang `ValidationError` — không có nơi thứ hai nào tạo ra body lỗi.
+### Xử lý lỗi LLM và provider
 
-### Lỗi LLM và provider
-
-Lỗi của LLM và provider được xem là điều kiện dự kiến có thể xảy ra, không phải những cú sập bất ngờ. Gateway sẽ phân loại từng lỗi và loại bỏ PII trước khi truyền tiếp. Khi một lời gọi LLM thất bại, hệ thống sẽ leo thang theo trình tự đã định:
+Lỗi từ LLM và provider được xem là điều kiện dự kiến có thể xảy ra, không phải crash bất thường. Gateway sẽ phân loại từng lỗi và loại bỏ PII trước khi nó lộ ra ngoài. Khi một lời gọi LLM thất bại, hệ thống sẽ đi qua một chuỗi leo thang đã định:
 
 ```mermaid
 flowchart TD
     A["LLM call fails"] --> B["Retry — same tier"]
     B -->|"still failing"| C["Fall back one tier"]
-    C -->|"still failing"| D["Soft-fail: return retry affordance to student"]
-    D --> E["Student can try again — never dead-ended"]
+    C -->|"still failing"| D["Soft-fail with retry affordance"]
+    D --> E["Student can retry — never dead-ended"]
 
     F["Malformed Expert output"] --> G["Bounded repair-retry"]
     G -->|"still malformed"| H["Skip and flag — never write partial evidence"]
 ```
 
-Khả năng fallback chéo giữa các provider được **bật mặc định cho Interface** (lượt hội thoại với người dùng) và **tắt mặc định cho Expert** (bước chấm điểm và ghi evidence, nơi tính nhất quán quan trọng hơn tính sẵn sàng).
+Fallback chéo provider được **bật mặc định cho Interface** (lượt hội thoại) và **tắt mặc định cho Expert** (bước ghi bằng chứng, nơi tính đúng đắn quan trọng hơn tính sẵn sàng).
 
----
+## Fire-and-Forget Metering
 
-## Khả năng chịu lỗi: bảo vệ, suy giảm, không bao giờ đẩy học sinh vào ngõ cụt
+Module LLM phát ra sự kiện `'llm.response'` khi một lời gọi model hoàn tất. Một observer được ghép thành phần sẽ lắng nghe sự kiện này, cộng tổng số token, tính chi phí theo mức giá của tier, rồi gọi `metering.recordLlmCall(...)` **mà không `await`** — chủ ý chọn kiểu fire-and-forget để một lần ghi billing chậm hoặc lỗi không bao giờ chặn lượt tương tác của học sinh.
 
-Job worker chạy các tác vụ bất đồng bộ (chấm điểm, ghi evidence) nằm **trong cùng tiến trình Node** với HTTP server. Đây là một lựa chọn kiến trúc có chủ đích ở quy mô cohort hiện tại — tách worker thành một tiến trình riêng được quản lý độc lập sẽ làm tăng độ phức tạp vận hành trước khi đội ngũ thực sự cần đến nó. Nhưng nếu một job hỏng nặng, trong tình huống xấu nhất nó vẫn có thể kéo sập cả tiến trình dùng chung. Chiến lược fault-tolerance ở đây không phớt lờ thực tế đó, mà biến bán kính ảnh hưởng thành thứ được nêu rõ và khống chế được.
+Chỉ đặt `void` trước một promise sẽ reject vẫn khiến lỗi nổi lên ở **cấp tiến trình** dưới dạng unhandled rejection. Đây không phải chuyện lý thuyết: khi phần nối dây thật giữa provider và metering được ghép với môi trường unit test không có cơ sở dữ liệu thật, lần ghi metering đã bị reject bất đồng bộ và **làm sập toàn bộ script `test:unit`** — mọi assertion đều qua, nhưng tiến trình thì chết.
 
-Triết lý điều phối gồm ba phần:
-
-1. **Bảo vệ thứ không thể thay thế.** Evidence log là append-only, idempotent, có transaction và có bản sao lưu. Không điều gì trên fast path được phép ghi evidence dở dang hoặc làm hỏng một bản ghi hoàn chỉnh.
-
-2. **Cho phép suy giảm với thứ có thể phục hồi.** Fast path — phần học sinh trực tiếp nhìn thấy — có thể an toàn trả về một báo cáo cũ nhưng hợp lệ, hoặc soft-fail kèm khả năng thử lại. Học sinh không bao giờ bị chặn ở ngõ cụt.
-
-3. **Để lỗi dừng ở mức lỗi đã bắt, không biến thành crash.** Mọi job handler đều được bọc lại để nếu handler ném exception, kết quả sẽ là một job failure chứ không phải cả tiến trình bị giết.
-
-**Các thanh chắn an toàn hiện có:**
-
-- Mọi job handler đều được bọc trong try/catch; lỗi không được xử lý sẽ được ghi nhận là job failure, không bị đẩy thẳng lên event loop.
-- Các lời gọi LLM và từng job riêng lẻ đều có giới hạn thời gian; công việc bị treo sẽ bị hủy, không bị để mặc tiếp tục chặn.
-- Các handler ở mức tiến trình cho `uncaughtException` và `unhandledRejection` sẽ ghi log sự kiện rồi thoát có kiểm soát để supervisor có thể khởi động lại.
-- Tiến trình chạy dưới sự giám sát của một supervisor có chính sách tự khởi động lại; vì job là durable (được lưu trong cơ sở dữ liệu), khi tiến trình khởi động lại, phần việc đang dở cũng sẽ được tiếp tục.
-
-Độ an toàn dữ liệu khi có crash là cao. Tính sẵn sàng hiện vẫn bị chặn bởi trần của mô hình một tiến trình, và điều đó được chấp nhận ở quy mô cohort hiện tại; khi đội ngũ vượt qua ngưỡng này, bước tiếp theo đã được ghi nhận rõ là tách worker ra thành tiến trình riêng.
-
----
-
-## Đo đạc kiểu fire-and-forget: quy tắc `.catch()`
-
-Module LLM phát ra sự kiện `'llm.response'` khi một lời gọi model hoàn tất. Một observer kết hợp sẽ lắng nghe sự kiện này, cộng tổng token, tính chi phí theo mức giá của tier, rồi gọi `metering.recordLlmCall(...)` — **cố ý không `await`**. Một lần ghi billing chậm hoặc lỗi không bao giờ được phép chặn hay làm hỏng lượt tương tác của học sinh.
-
-Vấn đề là: chỉ thêm `void` vào một promise sẽ reject vẫn khiến lỗi nổi lên ở **cấp tiến trình** dưới dạng unhandled rejection. Đây không phải rủi ro lý thuyết. Khi wiring thật giữa provider và metering được ghép lại rồi chạy trong môi trường unit test không có cơ sở dữ liệu thật, lần ghi metering bị reject bất đồng bộ và **làm sập toàn bộ script `test:unit`** — mọi assertion đều pass, nhưng chính lượt chạy thì chết.
-
-Cách sửa có hai phần:
+Quy tắc được rút ra từ đó — **fire-and-forget tuyệt đối không được có nghĩa là gửi đi rồi chẳng bao giờ biết chuyện gì xảy ra** — đòi hỏi hai bước ngay tại call site:
 
 ```ts
-// 1. Always .catch() at the source — a rejecting void is a process-level crash
+// Step 1: always .catch() — a rejecting void is a process-level crash
 metering.recordLlmCall(...).catch((err) => {
-  // 2. Always log what you swallowed — silence means billing data disappears with no signal
-  logger?.warn({ module: 'llm', event: 'metering.record_failed', purpose, agentRole }, err.message);
+  // Step 2: always log what you swallow — silence means billing data disappears with no signal
+  logger?.warn({ module: 'llm', event: 'metering.record_failed', purpose, agentRole });
 });
 ```
 
-Quy tắc tổng quát là: **fire-and-forget là một lựa chọn hợp lệ về khả năng chống chịu cho telemetry, nhưng tuyệt đối không được biến thành “bắn đi rồi chẳng bao giờ biết chuyện gì xảy ra”.** Hãy `.catch()` ngay tại nguồn. Và hãy log thứ bạn đã nuốt.
+Nuốt lỗi mà không log đồng nghĩa với việc dữ liệu billing biến mất trong im lặng. Dòng warn log là nửa còn lại, bắt buộc tương đương, của bản sửa này.
 
-> **Lưu ý:** Các dòng metering được tạo ra từ lần ghi này cũng chính là tín hiệu observability ở tầng vận hành cho mức dùng token và chi phí. Nếu lỗi bị nuốt mà không có dòng log nào, dữ liệu billing sẽ âm thầm biến mất — và đó chính là lý do vì sao dòng warn log là nửa còn lại, bắt buộc tương đương, của bản sửa này.
+## In-Process Worker Fault Tolerance
+
+Job worker chạy các tác vụ bất đồng bộ (chấm điểm, ghi bằng chứng) bên trong **cùng tiến trình Node.js** với HTTP server. Một job lỗi nặng, trong tình huống xấu nhất, có thể kéo sập cả hai. Thay vì tách worker ra thành tiến trình riêng, chiến lược ở đây làm cho bán kính ảnh hưởng trở nên **tường minh và có giới hạn**.
+
+Triết lý chi phối gồm ba phần:
+
+1. **Bảo vệ thứ không thể thay thế** — evidence log là append-only, idempotent, có transaction, và có sao lưu. Bằng chứng dở dang tuyệt đối không bao giờ được ghi.
+2. **Suy giảm với thứ có thể phục hồi** — đường đi nhanh sẽ trả về một báo cáo cũ nhưng vẫn hợp lệ, hoặc một soft-fail kèm khả năng thử lại. Học sinh không bao giờ bị chặn ở ngõ cụt.
+3. **Để lỗi dừng ở mức lỗi đã bắt, không thành crash** — mọi job handler đều được bọc để lỗi trở thành job failure, chứ không thành uncaught exception.
+
+```mermaid
+flowchart TD
+  Supervisor["Process Supervisor<br/>(auto-restart)"]
+  Process["Node.js Process"]
+  HTTP["HTTP Server (Fastify)"]
+  Worker["Job Worker (in-process)"]
+  EvidenceLog["Evidence Log<br/>(append-only, transactional)"]
+
+  Supervisor -->|"monitors & restarts"| Process
+  Process --> HTTP
+  Process --> Worker
+  Worker -->|"protected writes"| EvidenceLog
+  Worker -->|"errors become job failures,<br/>not process crashes"| Worker
+```
+
+**Các thanh chắn an toàn hiện có:**
+
+- Mọi job handler đều tự bắt lỗi của chính nó; lỗi được ghi nhận là job failure, không bị rò lên event loop.
+- Jobs và các lời gọi LLM đều có giới hạn thời gian để tránh chặn event loop.
+- Các handler ở cấp tiến trình cho `uncaughtException` và `unhandledRejection` sẽ log rồi thoát gọn gàng.
+- Tiến trình chạy dưới một supervisor có tự khởi động lại; vì jobs là durable nên khi có crash, phần việc đang dở sẽ được tiếp tục.
+
+Độ an toàn dữ liệu khi có crash là cao. Tính sẵn sàng vẫn bị giới hạn bởi trần của mô hình một tiến trình, và điều đó được chấp nhận ở quy mô cohort; khi đội ngũ vượt qua ngưỡng này, bước tiếp theo đã được ghi rõ là tách worker sang tiến trình riêng.

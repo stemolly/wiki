@@ -1,7 +1,9 @@
 ---
-title: Node Identity and Alias-Merge
-description: The three names one concept carries, slug mutability and the study anchor, finding existing slugs safely, what happens when two concepts turn out to be the same, and the discipline extended to the operator surface.
+title: Node Identity & Alias Merge
+description: The three identifiers a concept node carries, why the slug is mutable, how alias resolution works in both directions, known correctness gaps, and the slug-shaped operator surface.
 ---
+
+
 
 A concept in the engine is called a "node." Every node carries three different names, for three different readers, and none of them can be dropped or merged into another:
 
@@ -41,30 +43,6 @@ Three properties make it a genuine bound rather than a convention:
 A per-call row cap alone would not do the job: a caller could issue the same read repeatedly with different terms and accumulate the full graph a page at a time. What actually stops that is the relevance threshold — iterating junk terms buys no rows, so obtaining a reference requires already knowing roughly what you are looking for. That is exactly the property a preparer at a second ingestion run is supposed to have.
 
 The boundary that ADR-030's original no-listing rule was protecting is still intact: anchor *membership* comes from the material, and the lookup answers only "what is this concept already called?" — never "what concepts belong here?"
-
-## The study anchor
-
-A study anchor is the closed list of `{ slug, displayName }` pairs a prepared unit of study carries. It is how a session model knows which concept slugs exist for the material it is covering — without any enumeration of the graph.
-
-Because slugs are mutable, an anchor cannot store names. Because only `core/module.ts` may turn ids into slugs, an anchor holding ids cannot live outside the engine. This ruled out the obvious option: an operator-owned file in the repository.
-
-The engine's anchor tables are:
-
-- `engine.study_anchors` — one row per anchor, with the preparer's readable natural key and a label.
-- `engine.study_anchor_nodes` — membership as **uuid foreign keys** to `engine.nodes`.
-
-When an anchor is read, the engine forward-resolves each stored id through the merge map, then to its current slug. A member whose node was merged away is served under the survivor's name.
-
-The write surface is two explicitly-named operations — not `seed*`, because an anchor is not an open growing collection:
-
-- **Create**: throws if an anchor with that id already exists.
-- **Replace members**: a full-state write that explicitly replaces the current membership set.
-
-:::note
-The `seed*` verb is a semantic promise in this engine — every `seed*` operation is an idempotent upsert into an open, growing collection. An anchor is a closed list written whole, so borrowing the same verb would silently mislead any caller who had learned that `seed_node` is additive. The destructive operation carries the destruction in its name.
-:::
-
-Two load-bearing properties must not be weakened later. Anchor **membership** still comes from the study material, never from a query against the graph — the lookup that supplies spelling can never become one that supplies contents. And there is **no anchor-listing operation on any surface**: an anchor is read by an id the caller was given, because listing them would let a handful of calls reassemble the graph.
 
 ## When two concepts turn out to be one
 
@@ -157,3 +135,11 @@ The engine now has a real production entry point into `mergeNodes`: the `merge_n
 One gap that was previously dormant is now live. `getPrerequisites` does not resolve merged node ids — it walks the prerequisite graph using the raw id given to it, so if a node was merged away, its prerequisites are no longer reachable via the survivor's id. Similarly, `matchCatalog`'s `home_node_id` lookups do not resolve merged ids. The evidence half of this gap was closed when ADR-024 added read-time forward resolution to the evidence fold — all stored evidence is correctly unified onto the survivor on every projection. But the graph half (`getPrerequisites`) and the catalog half (`matchCatalog`) were explicitly left untouched when `mergeNodes` joined the MCP surface, because they required a genuine decision rather than a mechanical port-shape change.
 
 The projection fix is cheap to defer: beliefs are rebuildable projections over the log, so adding resolution to the fold and rebuilding retroactively consolidates every historical event. The graph and catalog halves need a real decision, because edges and catalog home nodes are mutable state rather than projections — either remap them at merge time, or resolve at every read entry point.
+
+## A schema gap: `edges.type` is unconstrained
+
+`engine.edges.type` is plain `text` with no `CHECK` constraint. The engine's only graph traversal — a recursive CTE in `getPrerequisites` — filters on the single literal `type = 'prereq'`. An edge seeded as `'prerequisite'`, `'Prereq'`, or `'prereq '` is accepted by both the database and the TypeScript compiler, then silently never walked. The concept appears to have no prerequisites, with no error and no log entry, because the failure looks exactly like an absence.
+
+The sibling catalog tables take the opposite approach — `status` carries a DB-level `CHECK` over its known values, so a typo there fails loudly. The asymmetry is not an oversight: leaving `edges.type` open is the correct posture for a column that is supposed to accept opaque domain edge kinds alongside the structural ones. Any constraint has to respect that.
+
+This leaves a real but accepted gap: a mistyped edge kind always silently becomes a domain edge. Candidates for closing it — a TypeScript union on the seed input, validation at the MCP trust boundary, or a format-only regex at the call site — are worth settling before the MCP exposes edge seeding at full scale.

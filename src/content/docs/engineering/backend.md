@@ -1,9 +1,9 @@
 ---
 title: Backend & Persistence
-description: PostgreSQL as the sole datastore, in-process job runner design, migration conventions, configuration patterns, and local dev tooling notes.
+description: PostgreSQL as the sole datastore, server module composition, node-pg-migrate conventions, STEMOLLY_ config, pool teardown hazards, blobstore/S3, and local dev tooling.
 ---
 
-Stemolly's backend keeps things deliberately simple: one PostgreSQL database holds every kind of data the app needs, and even asynchronous work runs through that same database instead of a separate queue. On top of that sits a small set of conventions — how migrations are written, how config is read, how the local dev stack is wired up — plus a few hard-won lessons about things that go wrong when a process runs for a long time. This page walks through all of it, from the top-level "why one database" decision down to the gotchas you'll actually hit running the stack on your machine.
+Stemolly's backend is built around one central choice: PostgreSQL is the only datastore. There is no Redis, no message broker, no graph database, no dedicated event store. Everything — the concept graph, append-only evidence logs, async job queue, session data, catalogs — lives in one Postgres instance. The server is a Fastify application whose modules are assembled by a single `compose()` call at boot, with config read through a single aggregator and validated by Zod before a shared connection pool is passed to each module. This page covers all of it: why the one-store choice was made, how async work runs inside the same database, migration conventions and hazards, how the server is assembled, config rules, and local dev tooling.
 
 ## One Postgres instance holds (almost) everything
 
@@ -62,6 +62,16 @@ When a migration exports no `down()`, `node-pg-migrate` auto-generates one by re
 This bit the project once already. A hand-written `down()` that only dropped a table left behind the standalone trigger function that `makeAppendOnly` had created — a trigger dies with its table, but a function is an independent schema object that doesn't. The next down-then-up cycle then failed with "function already exists." The fix was to delete the explicit `down()` and let auto-reverse handle it (which correctly drops trigger, function, table, extension, and schema in reverse order). The general guidance: migrations that create non-trivial objects — functions, triggers, extensions — should prefer auto-reverse and ship with a down-then-up regression test rather than a hand-rolled `down()`.
 :::
 
+The same class of problem resurfaced later at larger scale. A down/up-cycle integration test failure turned out to involve five migration files, not one: four missing `down()` exports for migrations that used raw `pgm.sql(...)` calls, plus one unrelated extension double-drop. The fix in all five cases was writing real `down()` functions — not narrowing the test to skip known-irreversible migrations. Narrowing the test would have converted a currently-true invariant ("every migration in this directory round-trips") into a permanently growing exception list, and would have left the project with no way to actually roll back engine schema in production.
+
+### Postgres extensions: one owner, no redeclarations
+
+A Postgres extension — such as `pgcrypto` — is installed once per database. `CREATE EXTENSION IF NOT EXISTS` is safe going up: it's a no-op if the extension already exists. Going down, however, `node-pg-migrate`'s auto-generated reversal for `createExtension` always issues a plain `DROP EXTENSION` with no `IF EXISTS` guard.
+
+If two migrations both declare the same extension and you run a full directory down-migration, the later migration's auto-reverse drops the extension first. When the chain reaches the earlier migration that originally "owned" the extension, its own auto-generated `DROP` fails because the extension is already gone.
+
+The rule: each extension should appear in exactly one migration file. If you must reference an extension in a migration that didn't create it, do not redeclare it with `createExtension`. If a migration already has a redundant `createExtension`, write an explicit `down()` that simply omits the extension drop — let the migration that actually owns the extension handle its own teardown.
+
 ### Naming the `evidence_events` uniqueness constraint
 
 One specific constraint has its own naming convention worth knowing, because it looks odd at first glance. The `UNIQUE NULLS NOT DISTINCT` constraint on `engine.evidence_events` has been dropped and recreated under a new name every time a migration changed which columns it covers or what one of those columns means:
@@ -83,6 +93,8 @@ Accepted ADR clauses do not automatically enforce themselves during implementati
 
 Environment variables follow one naming pattern, `STEMOLLY_<AREA>_<NAME>` (for example `STEMOLLY_LLM_TIER_FAST_MODEL`), and are read in exactly one place — a `config.ts` aggregator — validated per-module against zod schemas, rather than read ad hoc via `process.env` scattered through the codebase. `.env` files are dev-only, and secrets are never committed to the repo. This closed a gap the architecture phase had deliberately left open: config and secrets were named as a seam early on, but no concrete rule was minted until this convention.
 
+`loadConfig()` is the only function that reads `process.env`. It validates in two stages: first a Zod schema coerces and defaults all scalar env vars; then a second pass performs artifact-aware checks that env parsing alone cannot express — for example, loading the model-selection file and requiring `STEMOLLY_GOOGLE_API_KEY` only when the selected model set actually names the `google` provider. `STEMOLLY_STUDENT_ID` is always required. Invite TTL, email adapter, blobstore adapter, and content-admin token may default in development but become required when `NODE_ENV=production`. Even though the parsed config type leaves `database.url` optional, real server startup still requires it — `createPersistenceModule()` throws if the URL is absent.
+
 That still leaves one question per value: should it be required, or defaulted? For anything security-relevant, the answer settled on is **bounded and defaulted, plus a production-only presence check** — not a required variable with no default. The worked example is the invite-token TTL, previously a hardcoded constant deep in the pure domain layer:
 
 ```
@@ -92,6 +104,48 @@ STEMOLLY_INVITE_TTL_HOURS=168   # integer, 1-168, defaults to 168; presence chec
 A plain required variable was considered and rejected. Every other field in the config schema has a default, so one lone required field is inconsistent — and in practice it just gets the same value copy-pasted into dev, test, CI, and compose, which looks like a deliberate choice at each site while actually being one unreviewed value spread across four places. What actually needs protecting against is a *wrong* value, and a validated range does that directly: boot fails on zero, on negative, on non-numeric input, and on anything past the ceiling. The production-only presence check then supplies the forcing function exactly where stating the policy explicitly matters, and nowhere else.
 
 Two smaller details worth keeping in mind for any similar case: the unit belongs in the variable name, and it should be the unit legible at the deploy site — hours, not milliseconds, so the value isn't a wall of zeros. And the value must be passed into the domain function as a parameter rather than read from config inside the domain layer itself, so "make it configurable" never quietly sinks an environment read into code that's supposed to stay pure.
+
+## How the server is assembled
+
+The server entry point `index.ts` loads config with `loadConfig()`, calls `compose(config)` to build the module graph, and then calls `buildServer(ctx)` to wire everything into Fastify. `compose()` creates modules in dependency order — structured logger first, then persistence (which creates the one shared `pg.Pool`), then blobstore, metering, an OpenTelemetry tracer, the LLM provider and gateway, identity, content, engine, and tutor. Each module receives already-built collaborators directly; there is no IoC container.
+
+```mermaid
+graph LR
+  compose["compose()"] --> Pool["pg.Pool<br/>(one, shared)"]
+  Pool --> Persistence["persistence"]
+  Pool --> Metering["metering"]
+  Pool --> Identity["identity"]
+  Pool --> Content["content"]
+  Pool --> Engine["engine"]
+  Pool --> Tutor["tutor"]
+  compose --> Blobstore["blobstore<br/>(S3-compatible)"]
+  compose --> LLM["LLM gateway"]
+  compose --> Logger["logger"]
+```
+
+| Module | Key files | What it owns |
+|---|---|---|
+| **server-core** | `config.ts`, `composition.ts`, `app.ts`, `index.ts` | Boot config, module wiring, Fastify setup, process startup |
+| **server-api** | `api/` | HTTP `/api` surface, error envelope, route namespacing |
+| **server-tutor** | `tutor/` | Session lifecycle, board and transcript logs, checkpoint dispatch |
+| **server-engine** | `engine/` | Graph/catalog/evidence persistence, read-time belief assembly |
+| **server-content** | `content/`, `metering/`, `blobstore/`, `logger/`, `persistence/`, `errors/` | Content delivery, observability, storage, pool, typed errors |
+
+**server-api** route files are thin edge adapters. They validate or normalize requests, resolve server-owned values like `studentId`, and delegate to `tutor`, `content`, or `engine` APIs. The module owns namespace protection and the typed error-envelope producer; it never contains business logic.
+
+**server-tutor** never constructs its own adapters — `content`, `engine`, `llm`, repositories, and the logger are all injected at composition time. Its session API executes turns synchronously. The v1 kind registry covers `statement` and `choice` only.
+
+**server-engine** separates command and query paths through the evidence log. Slug↔id resolution, merge-map handling, and status-transition rules stay in `core/`; the Postgres repositories are constructor-injected SQL adapters. The module is the codebase's durable seam for student-knowledge state, with beliefs rebuilt from evidence rather than stored as mutable projections.
+
+**server-content** groups small infrastructure modules. Only `content` is exported to routes and tutor as behavior; `metering`, `blobstore`, `logger`, `persistence`, and `errors` are shared infrastructure consumed by the rest of the server.
+
+### Blobstore (S3-compatible)
+
+`createBlobstoreModule()` returns `{ client, bucket }`. The current adapter is `minio`, implemented with the AWS SDK's `S3Client` configured with a custom endpoint, `forcePathStyle: true`, and a fixed region of `us-east-1`. The factory fails synchronously on an unknown adapter name or if any of `endpoint`, `bucket`, `accessKeyId`, or `secretAccessKey` is missing. The shared logger can optionally be passed into the SDK middleware stack.
+
+### Content delivery and assignment ingest
+
+`ContentModuleApi` separates its read surface by caller. Browser-safe reads (brief, crop proxy, assignment list) are exposed as API routes. In-process-only reads (answer key, delivered board) are consumed directly by `tutor` — no route exposes them. Assignments reach the server through a bearer-authenticated admin route (`/api/admin/assignments`). The operator plugin's `pushAssignment()` reads a local `brief.json`, resolves and base64-encodes each cited crop, and POSTs one atomic payload. The route validates the body, decodes crops into `Buffer` objects, and calls `content.putAssignment()`.
 
 ## Running the stack locally
 
@@ -114,6 +168,18 @@ graph TD
 ```
 
 The dev file deliberately isn't named `docker-compose.override.yml` — Compose auto-merges anything with that exact filename into every `docker compose up`, which would silently pull dev config into the deployable's clean-checkout bring-up and defeat the whole point of the split. The two files also use distinct volume names (`stemolly-postgres-data` vs `stemolly-dev-postgres-data`) so running both from the same directory doesn't collide on one Docker volume.
+
+### Running production migrations — the migrator service
+
+The deployable `docker-compose.yml` publishes **no port** for Postgres — not even on loopback. This is a tested, binding invariant enforced by an integration test. Running migrations against the production database cannot be done via a port or SSH tunnel to a loopback-bound port.
+
+The mechanism is a dedicated `migrator` compose service on the internal compose network, which reaches `postgres:5432` the same way `server` and the MCP services do. It carries `profiles: ["migrate"]` so it never starts on a plain `docker compose up`. To run migrations:
+
+```bash
+docker compose run --rm migrator
+```
+
+The `migrator` service uses a separate image that includes `node-pg-migrate` and `tsx` as dev dependencies, unlike the stripped-down runtime `server` image — that runtime image has no migration tooling or migration files. Without the migrator service, there was no working way to run migrations against the deployable at all.
 
 :::caution
 Running a Postgres client (like Adminer) in its own container and pointing it at `localhost` will fail even when Postgres is running fine — inside that client's own container, `localhost` means the container itself, not the host, so you get a connection-refused error that looks exactly like the database isn't up. Fix it by running the client with `--network host` (Linux), or by addressing the host as `host.docker.internal` instead of `localhost`. Separately, a stray leading space in a copy-pasted host value produces a DNS lookup error that's easy to mistake for a real connectivity problem rather than a malformed string.
@@ -151,6 +217,8 @@ The resolution: run the migration step in a spawned **child process** — `node-
 :::caution
 The general rule: a process-global loader hook is a side effect on the *whole process*, not just on the call that installed it. Any helper that registers one is only safe to use where nothing meaningful loads afterward.
 :::
+
+**A `listen()` failure can leave the pool alive.** `index.ts` calls `compose()` before `app.listen()`, so the pool is already open when the bind attempt is made. If `listen()` rejects — for example, because the port is already in use — the catch block only logs the failure and sets `process.exitCode = 1`. It does not close the Fastify instance or end the pool. The process holds open database connections until something else terminates it. This is the same ownership gap as the teardown hazard below, just in a different shutdown path.
 
 **`compose()` builds a connection pool that nobody closes for you.** `compose(config)` constructs the `pg.Pool` backing the persistence and metering modules, but nothing downstream takes ownership of it. `buildServer(ctx)` receives an already-built app context and never touches the pool; Fastify's `app.close()` shuts down the HTTP server and its plugins, but knows nothing about a pool it didn't create.
 

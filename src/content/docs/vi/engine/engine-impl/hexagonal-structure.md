@@ -1,45 +1,69 @@
 ---
-title: "Cấu trúc lục giác: Những bài học riêng của engine"
-description: Những bài học sắc nét, rất riêng của engine về việc từ vựng miền được phép nằm ở đâu và các ranh giới port của mô-đun đã lệch ở chỗ nào.
+title: Cấu trúc mô-đun lục giác
+description: Cách engine tách lõi miền khỏi các adapter hạ tầng, sự phân chia giữa driving và driven port, vì sao `module.ts` là điểm nối duy nhất cho việc điều phối, và những bài học từ lần làm sai trước đó.
 ---
 
-Engine tuân theo hình dạng mô-đun hexagonal (lục giác): một core (lõi) được bao quanh bởi các port (cổng), tách nó khỏi phía gọi vào ở một bên và khỏi hạ tầng của chính nó ở bên còn lại. Phần lớn cấu trúc này là quy ước chuẩn của dự án, nhưng khi xây dựng riêng mô-đun này đã lộ ra vài bài học gắn với chính lịch sử của nó, đáng để giữ lại cho về sau.
+Engine là một hexagonal module (mô-đun lục giác): một domain core (lõi miền) được bao quanh bởi các infrastructure adapters (adapter hạ tầng). Core chứa toàn bộ các quy tắc; adapters chỉ chứa I/O. Ranh giới giữa chúng được giữ bằng leaf-adapter invariant (bất biến adapter lá) — một adapter không được chứa bất kỳ quyết định nào có thể diễn đạt mà không cần làm I/O.
 
-## Danh sách driven-port bị thiếu
+## Phân chia giữa driving và driven
 
-Một mô-đun hexagonal cần hai danh sách port riêng biệt: bề mặt **driving** mà phía gọi sử dụng, và bề mặt **driven** mà core cần từ hạ tầng của chính nó. Tài liệu thiết kế ban đầu của engine chỉ khai báo danh sách thứ nhất, được ghi rất rõ là "những gì phía gọi được phép gọi", và hoàn toàn không khai báo danh sách thứ hai.
+Một hexagonal module có hai nhóm port:
+
+- **Driving ports** (bề mặt đầu vào) — những gì bên gọi sẽ gọi vào. Với engine, đó là `core/driving.ts`, nơi các thao tác được MCP tools gọi đến.
+- **Driven ports** (bề mặt đầu ra) — những gì core cần từ hạ tầng. Với engine, đó là các repository interfaces (giao diện repository) trong `core/driven.ts`.
 
 ```mermaid
-flowchart TB
-    Design["Design doc declared<br/>only the driving surface"] --> Build["Build fills the silence<br/>by copying that same list"]
-    Build --> Result["The same operation names become<br/>both the public API and<br/>the repository interfaces"]
-    Result --> Problem["One operation is a computation,<br/>not a store read —<br/>belief-inference logic ends up<br/>sitting inside a repository"]
+flowchart LR
+    MCP["mcp/ tools"]
+    MOD["core/module.ts\norchestrator"]
+    DOM["domain/\nrules + folds"]
+    PG["Postgres adapters"]
+    MCP -->|"driving ports"| MOD
+    MOD --> DOM
+    MOD -->|"driven ports"| PG
 ```
 
-Phần triển khai đã lấp khoảng trống đó theo cách duy nhất mà nó có thể: sao chép danh sách driving để dùng luôn làm danh sách driven, khiến factory (bộ dựng) của mô-đun co lại thành một tập các lệnh chuyển tiếp một dòng từ lời gọi công khai sang các phương thức repository (kho lưu trữ) cùng tên. Với đa số thao tác, điều này vô hại, vì kiểu như "lưu cái này" hay "lấy cái kia" thật sự đều là thao tác cơ sở dữ liệu ở cả hai phía. Nó chỉ hỏng ở thao tác tính toán trạng thái niềm tin của học sinh, vì đó là một phép tính dựa trên nhiều nguồn chứ không phải một lần đọc kho lưu trữ — khi đã đặt tên nó thành một phương thức của repository thì theo định nghĩa nó buộc phải là như vậy, và mọi thứ từ đó trôi luôn mà không cần thêm quyết định nào khác: repository phải tự chạy logic dẫn xuất, nên nó cũng cần truy cập cả catalog entries (mục catalog) lẫn prerequisites (điều kiện tiên quyết), và cuối cùng chứa khoảng một trăm dòng quy tắc belief-inference (suy luận niềm tin) nằm cạnh SQL thuần.
+`core/module.ts` là nơi duy nhất được phép gọi nhiều hơn một port. Đây là seam (điểm nối) nơi slug resolution, envelope validation, occurrence-key assignment và alias resolution đều diễn ra — một lần cho mỗi lời gọi, trước khi bất kỳ adapter nào được gọi.
 
-Đây cũng là điều đáng nhớ như một bài học về review (rà soát): mọi lần review đều đối chiếu phần triển khai với *tên gọi* trong thiết kế, và các tên đó khớp nhau hoàn toàn qua nhiều hạng mục công việc liên tiếp — nhưng không ai kiểm tra việc một thao tác thuộc phía driving hay phía driven. Khiếm khuyết này chỉ lộ ra khi đặt toàn bộ các adapter cạnh nhau để so sánh, tức một góc nhìn ở cấp toàn mô-đun mà kiểu review theo từng thay đổi nhỏ gần như không bao giờ có.
+## Thiết kế đã sai ở đâu
 
-## Những cặp kiểu song sinh mà quy tắc chống trùng lặp không nhìn thấy
+Tài liệu thiết kế của engine chỉ khai báo bề mặt driving port — được gắn nhãn rất rõ là "những gì `mcp/` được phép gọi" — và hoàn toàn không khai báo phía driven. Phần triển khai đã lấp chỗ trống đó bằng cách sao chép chính danh sách driving, nên cùng chín tên thao tác trở thành cả public API (API công khai) của module lẫn bốn repository interfaces. Factory (bộ dựng) của module vì thế co lại thành chín lệnh chuyển tiếp một dòng.
 
-Các contract (hợp đồng) hướng model và hướng repository trong engine có vài cặp kiểu dữ liệu giống nhau từng trường một, chỉ khác đúng một trường — dạng hướng model gọi một concept (khái niệm) bằng slug, còn dạng song sinh hướng repository gọi nó bằng id, bám sát ranh giới slug đã mô tả ở trang về node identity (định danh nút).
+Với tám trong số chín thao tác đó, việc sao chép này là vô hại: kiểu "lưu cái này / lấy cái kia" đúng là thao tác cơ sở dữ liệu. Nó hỏng ở `getBeliefState`, vì đây là một phép tính dựa trên ba nguồn chứ không phải một lần đọc store (kho lưu trữ). Khi đặt tên nó thành một phương thức repository, tuyên bố đó tự biến nó thành như vậy — khoảng 130 dòng quy tắc belief inference (suy luận niềm tin) cuối cùng bị đẩy vào bên trong SQL.
 
-Quy tắc của dự án chống việc nhân đôi một shape (cấu trúc) dùng chung được đặt ra chính để chặn kiểu sao chép như thế này — nhưng bước kiểm tra tự động thực thi quy tắc đó lại dựa vào import, chứ không dựa vào cấu trúc. Hai định nghĩa kiểu dữ liệu có cấu trúc giống hệt nhau nhưng không import gì từ nhau vẫn vượt qua kiểm tra một cách sạch sẽ, nên nó không thể phân biệt một cặp song sinh thật sự cần thiết (trường hợp này đúng là như vậy, vì ranh giới slug-với-id khiến hai phía thực sự là hai shape khác nhau) với một bản sao chép-dán vô tình.
+Đây cũng là lý do mọi lần review đều đã thông qua. Review kiểm tra phần triển khai dựa trên *tên gọi* trong thiết kế, và các tên đó khớp chính xác qua ba issue liên tiếp. Còn việc phân loại — driving hay driven — thì chưa từng là một thuộc tính được kiểm tra.
 
-Điều này cần được ghi lại thay vì gạt đi, vì mô-đun này là bản triển khai tham chiếu để các mô-đun khác noi theo — một người mới nếu thấy trong mô-đun mẫu có nhiều cặp kiểu dữ liệu gần như giống hệt nhau thì hoàn toàn có thể hiểu đó là giấy phép cho việc nhân đôi thay vì chia sẻ. Nửa tích cực của quy tắc (một shape thật sự dùng chung thì phải đặt một lần trong domain layer) vẫn phải do người review thực thi ở đây; không có kiểm tra tự động nào thay thế cho phán đoán đó.
+## `module.ts` điều phối những gì
 
-## Một cột, hai bộ từ vựng
+`core/module.ts` xử lý, và chỉ mình nó xử lý:
 
-Các edge (cạnh) của engine — những liên kết giữa các concept, như prerequisites — có cột `type` nhưng thực ra lại chứa hai bộ từ vựng khác nhau dùng chung một trường: các kiểu quan hệ **structural** mà chính mã của engine sẽ rẽ nhánh theo (hiện tại chỉ có "prerequisite"), và các kiểu quan hệ **domain** mà engine hoàn toàn không tự diễn giải. Nếu xem đây là một bộ từ vựng duy nhất, thì mọi ràng buộc dự kiến đặt lên nó đều sẽ có vẻ như đang làm rò rỉ tri thức miền vào schema (lược đồ), điều mà quy tắc của dự án cấm — nhưng trên thực tế quy tắc đó chỉ chi phối nửa structural.
+- **Slug resolution** (`resolveSlugs`) — mọi lần chuyển từ slug sang uuid cho cả thao tác evidence lẫn graph.
+- **Forward alias resolution** — mọi id trả về từ `resolveSlugs` đều phải được forward-resolve qua merge map trước khi dùng.
+- **Occurrence-key assignment** (`assignOccurrenceKeys`) — gom các observation thành các bộ nhận dạng trước khi repository chèn dữ liệu.
+- **Envelope validation** — kiểm tra denylist của altitude-rule và enum ba kiểu.
+- **Belief fold orchestration** — gọi ba projector, hợp nhất kết quả của chúng, rồi dựng read model.
 
-Cách sửa là khai báo tập nhỏ các kiểu quan hệ structural mà engine thật sự diễn giải thành một hằng số trong mã domain, rồi chỉ kiểm tra mọi giá trị loại cạnh ở mức định dạng — một mẫu chữ thường kèm dấu gạch nối đơn thuần — còn mọi giá trị khác đều được chấp nhận như dữ liệu mờ đục. Cố ý không có ràng buộc ở mức cơ sở dữ liệu để giới hạn các giá trị này, vì một ràng buộc cứng sẽ khép cột đó lại trước các quan hệ domain phát sinh trong tương lai mà schema vốn phải mở ra để đón nhận. Mã traversal (duyệt) lọc theo hằng số đã khai báo thay vì theo chuỗi ký tự thô, nên nếu sau này bổ sung một quan hệ structural mới thì đó vẫn là thay đổi nhỏ và gói gọn.
+Trước issue #114, `PgEvidenceRepository.appendCheckpointBatch` tự thực hiện slug resolution, envelope validation và occurrence-key assignment ở bên trong. Việc chuyển orchestration này sang `module.ts` có nghĩa là repository giờ đây nhận `KeyedObservation[]` — đã được resolve trước, đã được gán key trước. Mọi đoạn mã gọi repository trực tiếp bằng dạng raw observation cũ giờ sẽ không còn type-check được nữa. Điểm gọi đúng là `EngineModuleApi.appendCheckpointBatch`.
 
-Có một khoảng hở được chấp nhận và ghi nhận lại, chứ không bị che đi: bước kiểm tra định dạng sẽ bắt được lỗi gõ sai kiểu viết hoa-thường hoặc thừa thiếu khoảng đệm, nhưng không thể bắt được *từ đồng nghĩa* — một từ khác nhưng vẫn đúng định dạng, ví dụ dùng từ đầy đủ ở nơi engine chỉ nhận dạng dạng viết tắt, sẽ được lưu lại y như một edge domain thông thường và đơn giản là không bao giờ được duyệt tới, mà không có lỗi nào xuất hiện ở đâu cả. Muốn bắt trường hợp đó thì phải liệt kê trọn bộ từ vựng, trong khi mục tiêu của việc giữ cột này mở chính là để tránh điều đó. Đây là một quyết định chứ không phải một sơ suất; cột catalog-status (trạng thái catalog) ở bên cạnh lại chọn hướng ngược lại chính vì tập trạng thái của nó thật sự nhỏ, khép kín và biết trước, còn edge types thì không.
+## Leaf-adapter invariant trong thực tế
 
-## Tên bảng catalog là từ vựng được chấp thuận, không phải rò rỉ miền
+Quy tắc "một adapter không được chứa quyết định nào có thể diễn đạt mà không cần I/O" đã xuất hiện rất cụ thể trong guard chống catalog re-propose:
 
-Quy tắc của dự án cấm schema của engine nêu tên một môn học, ngôn ngữ hay phương pháp dạy cụ thể — tính biến thiên chỉ được phép đi vào qua dữ liệu có kiểu, chứ không bao giờ qua tên bảng hay tên cột. Nếu chỉ đọc lướt ở mức grep, các bảng catalog của engine — được đặt tên theo misconceptions và reasoning patterns — trông đúng như một kiểu vi phạm như vậy, vì cả hai đều là từ ngữ sư phạm.
+- **Module core** có một bước check-and-throw rõ ràng. Đây là nơi *quy tắc* nằm.
+- **Adapter SQL** có `ON CONFLICT ... WHERE status <> 'rejected'`. Phần này chỉ tồn tại để khép cửa sổ race condition.
 
-Điểm phân biệt để hóa giải chuyện này nằm ở chỗ khác nhau giữa **schema** và **data**. Không có cột nào trong bất kỳ bảng nào của engine nêu tên một môn học hay phương pháp cụ thể; các từ "misconception" và "pattern" là từ vựng ở cấp engine của chính dự án, chứ không phải phần rò ra từ một môn học riêng lẻ nào — hai từ này vốn đã được dùng như thuật ngữ chung của dự án ở nơi khác, và bộ từ vựng observation-type (kiểu quan sát) cũng đã xem các tham chiếu catalog là định danh hạng nhất. Còn việc *các hàng dữ liệu* trong những bảng đó chứa gì lại là chuyện hoàn toàn khác, và việc các hàng nêu tên các concept thực tế chính là nơi nội dung đặc thù theo môn học phải tồn tại. Lập luận tương tự cũng áp dụng cho slug của node, nơi giá trị thực tế quả thật sẽ gọi tên những concept như `equivalent-fractions` — cột đó tồn tại như một khóa tra cứu ổn định cho việc seeding (nạp dữ liệu khởi tạo), còn nội dung của nó là data chứ không phải schema.
+Phương án xóa phần kiểm tra phía core đã được cân nhắc rồi bác bỏ. Nếu chỉ giữ guard trong SQL, quy tắc sẽ bị diễn đạt bên trong một adapter và trở nên vô hình nếu không đọc SQL — trái với invariant và cũng trái với nguyên tắc rằng các quy tắc của engine phải có thể đọc ra từ riêng TypeScript.
 
-Điều này đáng được viết ra vì tên các bảng đó về sau vẫn sẽ tiếp tục trông giống một vi phạm với bất kỳ ai rà soát migration để tìm từ cấm — bước kiểm tra tự động đang thực thi một phần quy tắc này chỉ canh các tên môn học cụ thể, chứ không canh hai từ này, nên phán đoán riêng này chỉ tồn tại ở phần review thủ công của quy trình.
+## Các cặp kiểu gần như song sinh
+
+Driving contract và driven contracts giữ bốn cặp kiểu có cấu trúc giống hệt nhau, chỉ khác đúng một trường — shape hướng model dùng `homeNodeSlug`, còn bản song sinh hướng repository dùng `homeNodeId`. `ProposeCandidateInput / ResolvedProposeCandidate` và `CandidateRef / ResolvedCandidateRef` là hai trường hợp rõ nhất.
+
+Đây không phải là vi phạm: ranh giới slug-với-uuid khiến chúng thực sự là hai shape khác nhau. Nhưng quy tắc CI thực thi R-30 ("một shape mà cả hai phía cùng cần thì phải nằm trong domain layer, không bao giờ bị nhân đôi") kiểm tra imports, chứ không kiểm tra tính đồng nhất về cấu trúc. Hai interface giống nhau từng trường mà không import gì từ nhau vẫn qua được. Quy tắc đó không thể phân biệt một cặp song sinh hợp lệ với một bản copy-paste.
+
+Điều này được ghi lại vì engine là implementation (bản triển khai) tham chiếu mà các module khác sẽ sao theo. Người đọc nhìn thấy bốn cặp gần như bản sao có thể hiểu đó là giấy phép cho việc clone thay vì chia sẻ. Nửa tích cực của R-30 — đặt shape dùng chung vào domain layer — hiện vẫn chỉ được review của con người thực thi.
+
+## R-5 và cách đặt tên bảng catalog
+
+R-5 cấm schema của engine gọi tên một domain, subject, language hay pedagogy cụ thể. Các bảng catalog được đặt tên là `misconception_catalog` và `pattern_catalog`, nghe như những từ mang tính sư phạm. Phán quyết ở bước review schema: chúng vẫn đạt.
+
+"Misconception" và "pattern" là từ vựng cấp engine của chính dự án. Không có *cột* nào trong bất kỳ bảng engine nào gọi tên một môn học hay một phương pháp; còn *các hàng* trong catalog thì gọi tên các concept thực, và đó chính xác là nơi R-5 muốn nội dung miền nằm vào. Bước lint deny-list thực thi một phần R-5 kiểm tra tên môn học, chứ không kiểm tra hai từ này, nên phán quyết đó hiện chỉ tồn tại ở phần review thủ công.

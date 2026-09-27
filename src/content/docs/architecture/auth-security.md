@@ -1,185 +1,186 @@
 ---
 title: Auth & Security
-description: How Stemolly manages identity, sessions, cookies, subdomain isolation, and the invite flow — and the specific constraints that keep each piece safe.
+description: How Stemolly controls who can log in, how sessions work, how the API stays protected, and how student-facing content is redacted.
 ---
 
-Stemolly's authentication model is deliberately simple: invite-only access, email + password credentials, server-side sessions, and three fixed roles. Every decision in this layer was made to match the actual threat model of a small product handling minors' data — not to follow a generic best-practice checklist. The sections below walk through each piece in order, from how a user enters the system to how the browser cookie stays in the right place.
+Stemolly has no public registration. Every user account begins with an Admin sending an invite; the system then applies a layered set of mechanisms — atomic invite tokens, cookie-isolated subdomains, fail-closed API guards, and server-side sessions — to make sure each role sees exactly what it should.
 
-## Who Can Log In, and How
+## Who Can Be Here: Roles and the Invite Model
 
-There is no public sign-up. An Admin invites a user by email and assigns them a role. The invitee receives a link, sets a password, and their account activates on the app that role unlocks. That is the only way an account is created.
+Three roles exist, and each maps to exactly one surface:
 
-**Passwords** are hashed with `argon2id`. This is the current best practice for password hashing — it is slow by design and resistant to GPU and side-channel attacks.
+| Role | Surface | Access |
+|---|---|---|
+| **Admin** | `console.base` | Onboards users; full access |
+| **Console** | `console.base` | Combined Author + Observer for the teaching team |
+| **Student** | `student.base` | Student app only |
 
-**Sessions** are server-side rows in Postgres. The browser receives an `httpOnly + Secure + SameSite` cookie that references the session row. Because the session lives on the server, it can be revoked instantly — logout works, and an Admin re-inviting a user is also the password-reset path.
+An Admin invites someone by email and assigns a role. The invitee sets a password through the invite link; the account then activates and routes to the correct app. No in-app UI exists to change a role after the fact. Password reset is handled by an Admin re-inviting the same user.
 
-### Why not JWT?
+Email-and-password was chosen to keep the system self-contained: a third-party auth provider (Auth0, Clerk, Supabase) would introduce a dependency that handles data belonging to K–11 minors. The parental-consent acknowledgment is lightweight for now; a full consent workflow is deferred past MVP.
 
-JSON Web Tokens (JWTs) are stateless: the server does not store them, so there is no way to revoke one before it expires. Statelessness solves a scaling problem (avoiding a shared session store across many servers), but Stemolly does not have that problem. The cost — losing revocation — was not worth paying.
+The three-role set is a **closed enum enforced at two levels**. In code, `domain/role.ts` defines `Role` as the literal union `'admin' | 'console' | 'student'` and exports an `isRole()` validator. `mintInvite()` deliberately accepts a raw `string` so out-of-range values become `ValidationError`s at the input boundary rather than silent TypeScript gaps. In the database, `invite_tokens_role_check` repeats the same restriction, so a raw SQL insert that bypasses the application also fails.
 
-### Why not a third-party auth provider?
+## The Invite Lifecycle
 
-Auth0, Clerk, Supabase Auth, and similar services would add a vendor dependency that handles the personal data of minors. The invite flow is simple enough to build directly, so that dependency was rejected.
-
-### Why not an RBAC framework?
-
-"RBAC" (Role-Based Access Control) frameworks are designed for many roles and fine-grained permissions. Stemolly has exactly three fixed roles. A full RBAC table would be speculative complexity for something that fits in a single enum.
-
----
-
-## Three Roles, Fixed at Invite Time
-
-| Role | What it accesses |
-|---|---|
-| `admin` | Full access — manages users and invites |
-| `console` | The Console app — the instructor-facing product (combines Author and Observer) |
-| `student` | The Student app only |
-
-Role is set when the Admin creates the invite. There is no in-app role-change UI. If a role must change, the Admin re-invites the user. This keeps the authorization model auditable: reading the invite record tells you everything about what an account can do.
-
----
-
-## Subdomain Topology: Why Ports Were Not Enough
-
-The natural first instinct for separating two apps in development is to run them on different ports — for example, `localhost:3000` for the Student app and `localhost:4000` for the Console. That approach was tested and rejected because of how browsers handle cookies.
-
-**Cookies are scoped by hostname, never by port.** This is specified in RFC 6265 and is not a quirk — it was a deliberate choice in the cookie specification. A cookie set on `localhost:7777` is sent to `localhost:7778`. This was verified with a Playwright spike across both Chromium and Firefox. The consequence: separate ports cannot isolate two session cookies. The isolation would work in production and silently fail in development — exactly the wrong place for a security mechanism to break.
-
-Separate hostnames *do* isolate cookie jars, including `*.localhost` subdomains. That is why Stemolly uses subdomains.
-
-### The Topology
+`mintInvite()` runs when an Admin creates an invite. It normalises the email (lowercase, trimmed), generates a 32-byte random token, computes its SHA-256 hex digest, stores **only the hash** in `identity.invite_tokens`, and hands the raw token to the email adapter.
 
 ```mermaid
-graph TD
-    A["student.base"] -->|"nginx server block"| N1["nginx: student block<br/>serves Student SPA<br/>proxies /api to backend"]
-    B["console.base"] -->|"nginx server block"| N2["nginx: console block<br/>serves Console SPA<br/>proxies /api to backend"]
-    N1 --> BE["Backend (shared Fastify process)"]
-    N2 --> BE
+sequenceDiagram
+    participant Admin
+    participant Server
+    participant DB as Postgres
+    participant Adapter as "File adapter"
+    participant Invitee
+
+    Admin->>Server: mintInvite(email, role)
+    Server->>DB: INSERT token_hash, email, role, expires_at
+    Server->>Adapter: append raw invite link to file
+    Adapter-->>Invitee: email with raw token in URL
+    Invitee->>Server: POST /api/auth/accept-invite
+    Server->>DB: atomic UPDATE WHERE token_hash matches and not yet redeemed
+    DB-->>Server: claimed row, or zero rows
+    Server-->>Invitee: redirect to login on role's correct host
 ```
 
-One nginx process runs two server blocks — one per hostname. Each block serves that app's static bundle and proxies `/api` to the same shared backend. Both apps live under one `STEMOLLY_PUBLIC_BASE_DOMAIN` environment variable: `localhost` in development, the real domain in production. Only that variable changes between environments; no code path differs.
+The raw token appears only inside the emailed link; a database dump yields nothing redeemable because only the SHA-256 digest is persisted.
 
-Because each SPA calls `/api` on its **own** origin, there is no cross-origin request. `SameSite` cookies remain sufficient for CSRF protection — no extra CSRF token is needed.
+**Why SHA-256 without a salt?** Password hashing uses slow algorithms (argon2id) to resist brute-force attacks, because passwords have a small, predictable input space. Invite tokens are different: the raw token is 32 bytes of cryptographic randomness — 64 hex characters — so the search space is enormous regardless of hash speed. A fast, unsalted SHA-256 is the correct choice here, and non-constant-time comparison is equally fine at this entropy level.
 
-### The `__Host-` Cookie Prefix
+**Redemption is atomic.** The database claim is one statement:
 
-Session cookies carry the `__Host-` prefix. This is a browser-enforced rule: a `__Host-` cookie must not have a `Domain` attribute, so it is bound to exactly the hostname that set it. A later configuration mistake adding `Domain=.stemolly.com` would simply be rejected by the browser. The "never shared across subdomains" property is an invariant the browser enforces, not a convention someone could accidentally undo.
+```sql
+UPDATE identity.invite_tokens
+SET redeemed_at = $now
+WHERE token_hash = $1
+  AND redeemed_at IS NULL
+  AND expires_at > $now
+RETURNING *
+```
 
-> **Important:** Subdomains are not the security boundary for data. A request to `student.<base>/api/console/*` reaches the exact same backend and is refused by the role guard — not by the hostname. Subdomains buy UI separation and cookie isolation; the role guard is what actually protects data.
+Postgres locks the row during the update scan, so the "unused and unexpired" check and the write are indivisible. Of two concurrent redemption attempts, exactly one gets a row back. A read-then-write pair would reopen a TOCTOU window — a race condition where both callers see an unredeemed row at the same time. This was verified against a real Postgres container with two concurrent requests.
 
----
+If the claim returns zero rows, `redeemInvite()` does a read-only lookup to classify the failure: **unknown token** → `NotFoundError`, **already redeemed** → `ConflictError`, **expired** → `ValidationError`.
 
-## Surface-Aware Login: One Session, One Host
+**The return value matters for security.** An early version of `redeemInvite()` returned only the role, discarding the email the same database query had already fetched. The accept-invite endpoint must set a password for a specific account — so with only a role, it had no server-verified way to know *whose* account that was. The available shortcut was to read the email from the request body. That is account takeover: an attacker with a valid invite for their own address submits an administrator's email and resets that account's password. The fix is for `redeemInvite()` to return `{ email, role }`, letting the endpoint identify the account without trusting client input.
 
-Separate origins alone are not enough. A student who types the Console's address still reaches its login page — a public login page cannot be hidden from someone who knows its URL. If login only checked the password, a student's valid credentials would mint a Console session, producing a shell where every data call returns 403. That is the "403 zone" the whole origin split was designed to prevent.
+After setting the password, accept-invite redirects to the login page on the role's correct host. It **mints no session**. There is exactly one path through which a session can be created; accept-invite is not on it.
 
-The solution is **surface-aware login**: the login endpoint derives the *surface* — which app is being accessed — from the request's `Host` header. It then checks whether the user's role belongs on that surface.
+:::note
+The current email adapter writes invite links to a configured file on disk rather than sending real email. `FileEmailAdapter.sendInvite()` appends the raw link to the configured path. No SMTP adapter exists yet.
+:::
+
+## Session Model: Server-Side Rows, Not Tokens
+
+Authenticated sessions are rows in Postgres, referenced by an `httpOnly; Secure; SameSite` cookie. The server has instant revocation: logout deletes the row. Passwords use argon2id hashing.
+
+JWTs were explicitly ruled out. The argument for them — stateless horizontal scaling — does not apply here (there is one backend process), and the cost — no instant revocation — does apply. A third-party auth provider was ruled out for the same reason as avoiding OAuth: it introduces a dependency handling data that belongs to minors.
+
+Authorization is a single role enum checked by middleware at the namespace level — no permission tables, no RBAC framework. Three fixed roles do not need one.
+
+:::caution
+**The session mechanism is not implemented yet.** `/api/auth/login`, `/api/auth/logout`, and `/api/auth/accept-invite` currently return `{ status: 'not-implemented' }`. No `httpOnly` cookie is issued anywhere in the codebase; no `@fastify/cookie` or `@fastify/session` package is present. Current request identity is derived from a hardcoded process-level config value (`config.identity.studentId`) rather than from a session. The design described above is the target state.
+:::
+
+## Subdomain Isolation and the Cookie Port Problem
+
+A session cookie must never leak from the Student surface to the Console surface. The obvious approach — serve them on the same host with different ports — does not work for cookies.
+
+Browser cookies predate the same-origin policy and their key is **host + path only, never port**. A cookie set on `localhost:7777` is sent to `localhost:7778`. RFC 6265 §8.5 specifies this explicitly under the heading "Weak Confidentiality." A Playwright spike confirmed the behaviour on both Chromium and Firefox. Port separation holds for JavaScript, CORS, and storage, but silently fails for the very mechanism being tested. Isolation would work in production and break in development, with no visible symptom.
+
+The solution is **separate hostnames**: `student.${STEMOLLY_PUBLIC_BASE_DOMAIN}` and `console.${STEMOLLY_PUBLIC_BASE_DOMAIN}`. In development the base domain is `localhost`; in production it is the real domain. Nothing in the codebase changes between environments — only the env-var value.
+
+```mermaid
+graph LR
+    SB["Browser<br/>(student.base)"] -->|"serves bundle + proxies /api"| NS["nginx: student.base block"]
+    CB["Browser<br/>(console.base)"] -->|"serves bundle + proxies /api"| NC["nginx: console.base block"]
+    NS --> Backend["Shared backend"]
+    NC --> Backend
+```
+
+Each nginx server block serves that app's static bundle and proxies `/api` to the same shared backend process. Because each SPA calls its API on its own origin, there is no CORS and `SameSite` alone is enough for CSRF protection.
+
+The session cookie carries the `__Host-` prefix. The browser enforces a strict invariant: it rejects any `__Host-` cookie that also carries a `Domain=` attribute. This makes "cookie never shared across subdomains" a browser-enforced property rather than a convention that a later configuration change could quietly break.
+
+:::note
+Subdomains are the **cookie isolation** boundary, not the data boundary. `student.base/api/console/*` reaches the same backend process and is refused by the **role guard**, not by hostname. The role guard protects data; the subdomain keeps each app's cookie in its own jar.
+:::
+
+## Surface-Aware Login
+
+Separate subdomains close the cookie-sharing gap but leave another door open. A student who types the Console's URL still reaches its login page — a public login page cannot be hidden. If login only checked the password, valid student credentials would mint a Console session, loading a shell in which every data call returns 403. That 403-filled shell is exactly what the split is meant to prevent.
+
+Login is therefore **surface-aware**: it derives the expected surface from the request's `Host` header (port stripped, so dev and production behave identically), then checks whether the authenticating role belongs to that surface.
 
 ```mermaid
 flowchart TD
-    REQ["POST /api/auth/login"] --> CREDS{"Credentials<br/>correct?"}
+    REQ["POST /api/auth/login"] --> CREDS{"Credentials correct?"}
     CREDS -->|No| R401["401 AUTH_INVALID_CREDENTIALS"]
-    CREDS -->|Yes| SURF{"Role matches<br/>this Host?"}
+    CREDS -->|Yes| SURF{"Role matches this Host?"}
     SURF -->|No| R403["403 AUTH_WRONG_SURFACE<br/>(no cookie set)"]
     SURF -->|Yes| SESSION["Create session row<br/>Set __Host- cookie<br/>200 OK"]
 ```
 
-The port is stripped from the `Host` header before checking, because development carries a port and production does not — stripping it keeps the logic identical in both environments.
+The server uses `Host` rather than a URL path because `Host` and the cookie's destination are both derived from the same origin and cannot disagree. A client freely controls the URL path — it could call a "student login" endpoint from a Console page — but the cookie still lands on the Console host. `Host` eliminates that gap.
 
-**Why `Host` and not the URL path?** The `Host` header and the cookie's destination are both derived from the same URL, so they cannot disagree. A client *chooses* the path freely — it could call a student login endpoint from a Console page — but the cookie would still land on the Console host.
+(`Host` is not a security boundary: it can be forged outside a browser, but that wins nothing because the role guard on each route is what actually protects data.)
 
-**Accept-invite closes the other door by construction.** The accept-invite endpoint sets the password and then redirects the user to the login page on their role's correct host. It never creates a session itself. So there is exactly one endpoint in the system that can create a session: the surface-aware login endpoint. The invariant is a property of the design, not a rule that two endpoints must both remember to follow.
+## Protecting the API: Namespaces, Guards, and Status Codes
 
----
+All API routes live in one of four prefix-scoped namespaces, each with a different gate:
 
-## 401 vs 403: A Contract the Frontend Relies On
-
-On all role-gated routes, `401` and `403` have distinct, strict meanings:
-
-| Code | Meaning |
-|---|---|
-| `401` | No valid session — absent or expired. Retry with login. |
-| `403` | Valid session, wrong role or wrong surface. Retrying will not help. |
-
-This is not just convention. The API client uses a generic rule: any `401` received outside `/api/auth/*` triggers the session-expiry handler and redirects the user to the login page. If a permission error returned `401`, the SPA would bounce a logged-in user to a login page with no explanation — a confusing loop that looks like a session bug.
-
-Note that the login endpoint itself uses a different contract (it returns `401` for bad credentials and `403` for correct credentials on the wrong surface). Those are `/api/auth/*` responses, and the api-client deliberately exempts that prefix from the generic session-expiry rule.
-
----
-
-## The Public Namespace Problem
-
-Login and accept-invite must run before the caller has any session or role. They cannot live inside the role-gated namespaces (`/api/student/*`, `/api/console/*`, `/api/admin/*`) without breaking the deny-by-default property that makes those namespaces auditable.
-
-They live instead in a fourth prefix: `/api/auth/*`. This prefix carries no role guard — it is deliberately public.
-
-The problem is that this inverts the failure mode. In a gated namespace, forgetting a guard is loud: the route returns 403 immediately. In `/api/auth/*`, there is no guard to forget. A carelessly added route is public, works perfectly, passes its tests, and produces no symptom.
-
-The name makes this worse: `/api/auth/*` naturally attracts credential-handling routes — password reset, session check, email verification — into the one namespace without a lock.
-
-**The mitigation is a CI-checked allowlist.** A CI step asserts that the actual route table of `/api/auth/*` matches an explicit list of approved routes. Adding a new public route without updating the allowlist fails the build. The allowlist does not prevent a route from being made public, but it prevents it from being made public *accidentally*. Editing the allowlist is the human gate where someone must ask: "Should this really be public?"
-
----
-
-## The Fail-Closed Role Guard
-
-The three role-scoped namespaces were created with their role guard wired in **before** any session logic existed anywhere in the codebase. The guard (`roleGuard` in `server/src/api/plugins/auth.ts`) starts as a placeholder whose body unconditionally throws `403`.
-
-This is intentional. Two properties make it safe to build this way:
-
-1. **Plugin-scope attachment.** The hook is registered on the plugin (`studentApp.addHook('onRequest', roleGuard)`), not on individual routes. Fastify's encapsulation means every route added to that namespace later is automatically covered — the lock is on the room, not on each door.
-2. **Stable exported signature.** When the real session logic arrives, only the function body changes. None of the registration call sites need to be touched.
-
-The alternative — waiting until sessions existed before creating the namespaces — would have left every route added in the meantime unprotected by default and required a retrofit later. Building the gate first inverts the default: everything is denied until something explicitly opens it.
-
----
-
-## Invite Token Security
-
-### Atomic Single-Use
-
-An invite token can be redeemed exactly once. Single-use is enforced by a single atomic SQL statement, not a read-then-write pair:
-
-```sql
-UPDATE identity.invite_tokens
-SET    redeemed_at = $now
-WHERE  token_hash  = $1
-  AND  redeemed_at IS NULL
-  AND  expires_at  > $now
-RETURNING *
+```mermaid
+graph TD
+    API["/api/*"] --> PubAuth["/api/auth/*<br/>no guard — public namespace"]
+    API --> Stu["/api/student/*<br/>role guard: student"]
+    API --> Con["/api/console/*<br/>role guard: console"]
+    API --> Adm["/api/admin/*<br/>bearer token required"]
 ```
 
-Postgres acquires a row-level lock during the update scan, making the "unused and unexpired" check and the write indivisible. Of two concurrent redemption attempts, exactly one matches the `WHERE` clause and gets the row; the other gets nothing. A read-then-write sequence would reopen a TOCTOU window (Time-Of-Check to Time-Of-Use — a race condition where the state changes between reading it and acting on it).
+**The three role-gated namespaces are fail-closed.** The `roleGuard` hook is attached at plugin scope — `studentApp.addHook('onRequest', roleGuard)` — so every route added to the namespace is automatically protected. A new route in a gated namespace returns 403 until the session logic selectively opens it; it cannot accidentally be public.
 
-### Hash-Only Storage
+The guard was mounted with a placeholder body that unconditionally throws 403, before any session mechanism existed. Building the gate first means denial is the default; each later piece of work opens exactly what it intends to open. The alternative — deferring the namespaces until sessions existed — would have left every interim route unprotected and required a later retrofit.
 
-Only the SHA-256 hash of the token is stored. The raw 256-bit token (32 random bytes) exists only in the emailed link. A database dump yields nothing redeemable.
+**The `/api/auth/*` exception inverts the failure mode.** Login and accept-invite must be public — they run before any session exists — so they get their own prefix with no role guard. In a gated namespace, a forgotten guard announces itself as a 403; in `/api/auth/*`, a carelessly added route is silently public: it works, passes tests, and produces no symptom. The mitigation is a CI check asserting the namespace's route table equals an explicit allowlist. Editing the allowlist is the human gate where someone decides whether a route really should be public.
 
-The raw token is high-entropy random, not a password. For passwords, slow hashing (like argon2id) is necessary because the input space is small and predictable. For a 256-bit random token, the input space is astronomical — a fast hash like SHA-256 is correct here, and the non-constant-time comparison on the redeem path is similarly unexploitable at this entropy level.
+**The 401 / 403 contract is strict.** The frontend API client has one rule: any `401` received outside `/api/auth/*` triggers the session-expiry handler and redirects to login. The role-guard contract must therefore be:
 
-### The Account-Takeover Risk (and Its Fix)
+| Code | Meaning on protected routes |
+|---|---|
+| `401` | Session is absent or expired — **only** this |
+| `403` | Anything else: wrong role, active refusal |
 
-An earlier version of the invite redemption function returned only the user's role — it discarded the email address that the same database query had already fetched. The accept-invite endpoint needed to know *whose* password to set, and with only a role available, the obvious shortcut was to read the email from the request body.
+A wrong-role `401` would redirect a legitimately logged-in user to the login page, looking like a session bug. The login endpoint itself uses `401` for bad credentials and `403` for a correct-credentials-wrong-surface rejection — those are `/api/auth/*` responses, explicitly exempt from the frontend rule, and must not be conflated with the role-guard contract.
 
-That is account takeover: an attacker who holds a valid invite for their own address could submit an administrator's email in the request body and set the password on that account.
+## Admin Authentication: Token-Based, Not Session-Based
 
-The fix is for the redemption function to return `{ email, role }`. The caller can then identify the account from the server-verified email without trusting any client input. The lesson: when specifying a security-relevant interface, derive its return shape from what the *caller* needs in order to act safely — not from the minimum the current task requires.
+The `/api/admin` namespace uses HTTP token authentication rather than session cookies. Requests must carry an `Authorization` header with a token value matching the configured `contentAdminToken`. The `createAdminBearerAuth()` hook compares equal-length buffers using `timingSafeEqual()` to prevent timing-based leaks. If the configured token is unset, the hook **fails closed** — no request gets through.
 
----
+On `/api/admin`, a `401` means token-credential failure — not the session-expiry meaning that `401` carries on student and console routes.
 
-## Seeding vs. Migrations
+## What Students Never See: Content Redaction
 
-A migration runs in **every** environment by design. Placing fixture data — such as a demo admin account with a known password — in a migration means it reaches production automatically. That is why seeds are never migrations.
+Answer keys must never cross the browser boundary for student requests. The architecture enforces this inside the content module, not at the route layer.
 
-Instead, seed data is applied by idempotent application code keyed on a deterministic natural key. Re-running it is always a no-op.
+`toStudentView(record)` projects an `AssignmentRecord` to only the fields a student may receive — `briefSnapshotId`, `anchorId`, `slugs`, `nonKeyContent`, and `cropRefs` — dropping both `answerKey` and `board` **at the type level**. This projection runs inside `content/core` before a brief reaches any route handler. No route handler needs to remember to redact: the TypeScript type makes it structurally impossible to forward key material.
 
-There are two distinct classes of seed data, and they differ in an important way:
+The answer key is also excluded from blob-store delivery. Anything served through `urlFor` sits outside the role-guarded routes, so the key must not appear there at all. This design (ADR-050) overturned an earlier proof-of-concept posture — "ship everything together, there is no server" — once a server existed to withhold the key.
 
-| Type | Example | Must reach production? | Config gate |
+:::caution
+**Content URL expiry is not enforced.** `urlFor(key, ttlSeconds)` returns `/api/content/{key}?ttl={ttlSeconds}`, but the content proxy route never reads or validates the `ttl` parameter and forwards any key indefinitely. Once a student's crop URL is known, the proxy path remains reachable past the advertised expiry. The design positions `urlFor` as a bounded-time capability; the current adapter under-delivers that promise.
+:::
+
+## Operational Risks
+
+**Seed data must not reach production through migrations.** Migrations run in every environment by definition, so a fixture placed in a migration — a demo admin account with a known password, for example — lands in production automatically. The rule: migrations define schema only. Demo and development fixtures are applied by idempotent application code that requires an explicit config flag; with the flag absent, running migrations and booting the server leaves no fixture rows.
+
+There are two classes of seed data and they differ:
+
+| Class | Example | Reaches production? | Requires flag? |
 |---|---|---|---|
-| Dev/demo fixtures | Demo admin account | **No** — must be absent | Config flag required |
-| Product content | Curricula, briefs, catalogs | **Yes** | No gate |
+| Dev / demo fixtures | Demo admin account | **No** — must be absent | Yes |
+| Product content | Curricula, briefs, catalogs | **Yes** | No |
 
-A single "seeds are off in production" rule would be wrong for product content that needs to be there. The two classes share only idempotency and the rule "not in migrations"; everything else is decided per class.
+A single "seeds off in production" rule would be wrong for product content that must be there. The absence of demo fixtures in production is checked behaviourally: with the demo flag unset, migrate and boot must leave no fixture rows. This catches fixtures hidden inside migrations because migrations run regardless of the flag.
 
-The absence of demo fixtures in production is checked behaviourally: with the demo flag unset, migrate and boot must leave no fixture rows. This catches fixtures hidden inside migrations because migrations run regardless of the flag.
+**The MCP server trusts deployment boundaries.** The MCP HTTP path does not authenticate callers internally. Once a request reaches `handleHttpRequest()`, the code builds the configured role's server and serves its tools. The accepted trade-off is that the operator must bind the container to loopback only and place an edge token check in front. An operator who publishes the MCP container publicly exposes an unauthenticated write surface — operator-role tools include graph seeding, catalog approval, study-anchor mutation, concept-gap moderation, and node merges.

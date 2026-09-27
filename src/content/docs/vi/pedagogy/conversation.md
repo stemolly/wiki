@@ -1,158 +1,120 @@
 ---
-title: Hội thoại và quốc tế hóa
-description: Cách cơ chế plugin mở, pipeline render Markdown+KaTeX và ba trục ngôn ngữ độc lập của Stemolly phối hợp với nhau để vận hành cuộc hội thoại gia sư.
+title: "Hội thoại và quốc tế hóa"
+description: "Cách tầng hội thoại được xây như một cơ chế plugin mở với pipeline render Markdown+KaTeX, và cách ba trục ngôn ngữ độc lập giúp các biến sư phạm không bị lẫn vào nhau."
 ---
 
-Mỗi lượt trao đổi giữa học sinh và gia sư đều đi qua ba hệ thống đan cài với nhau: một cơ chế plugin giúp các kiểu thông điệp luôn mở rộng được, một pipeline render (chuỗi xử lý hiển thị) định dạng an toàn cho Markdown và công thức toán, và một mô hình ngôn ngữ cho phép gia sư hướng dẫn bằng chính ngôn ngữ của học sinh trong khi nội dung môn học vẫn giữ ở ngôn ngữ đích. Trang này giải thích ba hệ thống đó vận hành ra sao — và quan trọng hơn, vì sao chúng được thiết kế theo cách này.
-
----
-
-## Mọi thông điệp đều là một thực thể plugin có kiểu
-
-Cuộc hội thoại không có một danh sách cố định các kiểu thông điệp. Dù đó là phần văn bản Markdown của gia sư, một câu hỏi trắc nghiệm, một đoạn văn để đọc, hay chính câu trả lời mà học sinh nộp lên — kể cả công thức LaTeX được gõ bằng bảng ký hiệu — thì mọi thông điệp đều là một **typed plugin instance** (thực thể plugin có kiểu), và phía frontend (giao diện người dùng) sẽ render (hiển thị) bằng cách tra đúng renderer (bộ hiển thị) tương ứng với trường `type` của nó.
-
-Điều này có nghĩa là:
-- Không có kiểu thông điệp nào được ưu tiên đặc biệt, cũng không có tác giả nào được ưu tiên đặc biệt.
-- Việc thêm một dạng tương tác mới (bài kéo-thả, trò chơi từ vựng) hoàn toàn chỉ là bổ sung thêm: viết một kiểu mới và một renderer mới. Không cần thay đổi gì trong tutor engine (bộ máy gia sư) hay các contract (giao kèo dữ liệu) lõi.
-- Nội dung có thể chấm điểm — bài quiz, bài tập có đáp án đúng — luôn phải bám vào lesson brief đã được biên soạn hoặc Expert agent, tuyệt đối không do Interface agent nhẹ hơn tự ứng biến. Cơ chế plugin không thay đổi nguyên tắc này; nó chỉ là cách chuyển nội dung đến nơi hiển thị.
-
-Toàn bộ giao diện plugin — cách một plugin khai báo manifest (bản khai báo), mô tả năng lực của nó cho các AI agent, và đăng ký renderer — hiện được cố ý chưa thiết kế xong. Nó sẽ được định hình khi đã có trong tay vài loại plugin thực tế, để lớp trừu tượng phản ánh đúng những gì thực sự khác nhau giữa các loại, thay vì phản ánh điều mà chỉ một ví dụ đơn lẻ gợi ra.
+Mọi thông điệp trao đổi giữa học sinh và gia sư — từ một đoạn giải thích bằng văn xuôi, một công thức, một câu hỏi trắc nghiệm cho đến câu trả lời do học sinh gõ vào — đều đi qua cùng một cơ chế plugin (thành phần mở rộng) thống nhất. Đồng thời, ngôn ngữ gia sư sử dụng, ngôn ngữ của nội dung học liệu và ngôn ngữ của phần giao diện là ba thiết lập riêng biệt, tuyệt đối không được nhập làm một. Trang này giải thích cả hai phần đó: kiến trúc plugin và ba trục ngôn ngữ.
 
 ---
 
-## Message envelope: chốt trước, và vì sao thứ tự đó quan trọng
+## Hội thoại như một cơ chế plugin mở
 
-Trước khi giao diện plugin được thiết kế, có một thứ *đã* được khóa lại: **message envelope** (phần vỏ thông điệp).
+Tầng hội thoại không có một tập kiểu thông điệp cố định. Thay vào đó, mỗi thông điệp đều là một **typed plugin instance** (thực thể plugin có kiểu) — phía frontend (giao diện người dùng) đọc trường `type` rồi chuyển `payload` sang đúng renderer (bộ hiển thị) tương ứng. Cách này áp dụng như nhau cho đầu ra của gia sư (văn bản Markdown, thẻ câu hỏi) lẫn đầu vào của học sinh (văn bản thường, một công thức LaTeX đã nộp). Không có kiểu thông điệp nào được ưu tiên riêng, cũng không có tác giả nào giữ vị trí đặc biệt.
 
-```
+Lợi ích thực tế rất rõ: muốn thêm một kiểu tương tác mới (bài tập kéo-thả, bài rà soát đoạn văn), ta chỉ cần viết thêm một `type` mới cùng renderer tương ứng. Không cần thay đổi gì trong tutor engine hay logic cốt lõi của hội thoại.
+
+Đây là **message envelope** (khung thông điệp) — hình dạng bên ngoài cố định mà mọi thông điệp cùng chia sẻ:
+
+```ts
 {
   id:            string,   // unique message id
   author:        string,   // "tutor" | "student" | ...
-  type:          string,   // open string — not a closed union
+  type:          string,   // open string — never a closed union
   payload:       unknown,  // validated by the plugin's own schema
   schemaVersion: number
 }
 ```
 
-Mọi thông điệp đi qua đường truyền đều dùng hình dạng này. Mỗi plugin tự kiểm tra `payload` của riêng mình; còn bản thân envelope được kiểm tra ở ranh giới giữa các hệ thống.
+Mỗi plugin tự sở hữu schema (lược đồ) để kiểm tra `payload` của chính nó.
 
-### Vì sao chốt envelope trước giao diện plugin?
+### Vì sao `type` phải luôn là một open string
 
-Hai phần này có tính đảo ngược hoàn toàn trái ngược nhau.
+Một phản xạ rất tự nhiên trong TypeScript là viết `type` thành một closed union — `"markdown" | "mcq" | "text-input"`. Cách đó có thể ổn trong một sprint, rồi sau đó âm thầm biến thành điểm bắt buộc phải sửa mỗi khi có plugin mới. Trường `type` được chủ đích giữ ở dạng open string. Nhờ vậy, gói shared contracts (hợp đồng dùng chung) không cần đụng tới khi plugin mới xuất hiện.
 
-**Envelope** chỉ là một wire format (định dạng truyền dữ liệu) giữa hai bên tiêu thụ trong cùng một monorepo (kho mã đơn) — engine tạo ra thông điệp và frontend render chúng. Chừng nào transcript (bản ghi hội thoại) vẫn chưa được lưu vào cơ sở dữ liệu, việc đổi hình dạng của envelope chỉ tốn một commit (lần cập nhật mã). Đây là quyết định rủi ro thấp, có thể chốt sớm.
-
-**Plugin interface** (manifest, contract cho config/kết quả, mô tả năng lực cho agent, registry phía backend) thì ngược lại: chỉ một loại plugin không thể cho thấy thực sự có những điểm nào thay đổi giữa các loại. Nếu thiết kế giao diện dựa trên một ví dụ duy nhất, ta sẽ vô tình đóng cứng sai lớp trừu tượng. Nó cần vài loại plugin thực tế — ít nhất Markdown, nhập công thức và trắc nghiệm — để định hình cho đúng.
-
-### Trường `type` dạng open string
-
-Chi tiết quan trọng nhất trong envelope là `type` là một **open string** (chuỗi mở), chứ không phải một closed union (hợp kiểu đóng) của TypeScript như `"markdown" | "text-input"`.
-
-Khi mới chỉ có một loại, closed union là phản xạ rất tự nhiên. Nhưng nó sẽ biến gói contract dùng chung thành nơi bắt buộc phải sửa mỗi khi thêm bất kỳ plugin nào — đúng kiểu kết dính mà cơ chế plugin mở được tạo ra để tránh. Open string giữ cho tập kiểu luôn mở. Bất kỳ plugin nào cũng có thể đưa vào một type mới mà không phải chạm tới gói dùng chung.
+:::caution
+Đừng bao giờ thay `type: string` dạng mở bằng một closed union trong gói contracts. Làm vậy sẽ phá hỏng cơ chế plugin mở và buộc phải có một chỉnh sửa trung tâm cho mỗi kiểu tương tác mới.
+:::
 
 ```mermaid
 flowchart LR
-    E["Envelope<br/>{ id, author, type, payload }"]
-    E --> R{"Look up renderer<br/>by type string"}
-    R --> MD["Markdown renderer"]
-    R --> FI["Formula-input renderer"]
-    R --> MC["Multiple-choice renderer"]
-    R --> EX["... future plugins"]
+  Envelope["Message envelope<br/>{ id, author, type, payload }"]
+  Envelope --> MD["type: markdown<br/>→ Markdown+KaTeX renderer"]
+  Envelope --> MCQ["type: multiple-choice<br/>→ MCQ renderer"]
+  Envelope --> Formula["type: formula-input<br/>→ KaTeX editor"]
+  Envelope --> TI["type: text-input<br/>→ Plain text renderer"]
+  Envelope --> Dots["type: …<br/>→ future plugins"]
 ```
 
 ---
 
-## Pipeline render: Markdown + KaTeX + allowlist đã được làm sạch
+## Message envelope đi trước
 
-Renderer mặc định của gia sư hỗ trợ ba lớp định dạng:
+Cơ chế plugin có hai phần có thể tách bạch:
 
-| Lớp | Vai trò |
-|---|---|
-| **Markdown** | Tiêu đề, danh sách, chữ đậm, mã nội dòng, khối mã |
-| **KaTeX** | Công thức LaTeX được render trong trình duyệt — nếu không có lớp này thì một buổi học toán kiểu Socratic sẽ gần như không dùng được |
-| **HTML decoration allowlist** | Một tập thẻ hẹp (`span`, `mark`, `sup`, `sub`) chỉ với các thuộc tính an toàn |
+1. **Message envelope** — wire format (định dạng truyền dữ liệu) cho mọi thông điệp.
+2. **Plugin interface** (giao diện plugin) — manifest (bản khai báo), hợp đồng config/kết quả, mô tả năng lực, backend registry (bộ đăng ký phía backend), versioning (quản lý phiên bản).
 
-HTML thô không được render tự do. Mọi thông điệp — từ tutor LLM bán tin cậy và từ học sinh hoàn toàn không tin cậy — đều đi qua một bộ làm sạch kiểu DOMPurify để loại bỏ thẻ `<script>`, các event handler (trình xử lý sự kiện, như `onerror`, `onclick`, v.v.) và iframe. Allowlist (danh sách cho phép) và bộ làm sạch này áp dụng như nhau cho cả hai phía tác giả; không có đường tắt nào dành cho "nguồn đáng tin".
+Hai phần này được xây theo đúng thứ tự đó, và lý do rất quan trọng. Hiện giờ envelope rất dễ đổi: chưa có transcript nào được lưu bền vững, nên nó mới chỉ là wire format giữa hai thành phần trong cùng một monorepo (kho mã đơn). Chỉ cần một commit là có thể đổi lại hình dạng của nó. Plugin interface thì ngược hẳn: chỉ một kiểu plugin không thể cho thấy điều gì thực sự thay đổi giữa các loại. Nếu thiết kế nó chỉ dựa trên một ví dụ duy nhất (chẳng hạn plugin markdown), ta sẽ chốt nhầm lớp trừu tượng. Phần này nên đợi đến khi đã có vài kiểu thực tế — markdown, nhập công thức, multiple-choice — để dẫn đường cho thiết kế.
 
-Đây chính là plugin render cụ thể mà plugin ví dụ chỉ có văn bản thuần trước đó vốn luôn được dự định sẽ thay thế bằng nó. Văn bản thuần chỉ là ví dụ tham chiếu để minh họa mẫu thiết kế; Markdown+KaTeX mới là plugin đầu tiên thực sự.
-
-### Bộ khởi đầu cho MVP
-
-Khi cơ chế plugin đầy đủ được xây xong — điều này xảy ra khi đã có đủ loại plugin để soi sáng cho thiết kế giao diện, chứ không theo một lịch cố định — thì các thành phần đầu tiên sẽ là:
-
-- **Markdown** — văn bản và lời giải thích của gia sư
-- **Text-input** — câu trả lời văn bản tự do cơ bản của học sinh
-- **Formula-input** — câu trả lời của học sinh ở dạng LaTeX, thông qua bảng ký hiệu dựa trên KaTeX
-- **Multiple-choice** — các tương tác trắc nghiệm có cấu trúc
-
-Các plugin cho passage và essay-review đã được dự tính cho phần môn Ngôn ngữ và sẽ được để sang giai đoạn đó.
-
-Hành vi của bộ làm sạch được khóa bằng các bài kiểm thử TDD và được một fitness function (hàm kiểm chuẩn) là `G-15` bảo vệ song song với bộ kiểm thử mở rộng plugin, để một plugin trong tương lai không vô tình mở ra lỗ hổng XSS.
+```mermaid
+flowchart LR
+  A["Envelope settled<br/>(id, author, type, payload)"] --> B["Several plugin types built<br/>(markdown, formula, MCQ)"]
+  B --> C["Plugin interface designed<br/>(manifest, contracts, registry)"]
+```
 
 ---
 
-## Hai ngôn ngữ trong một cuộc hội thoại
+## Plugin render chính: Markdown + KaTeX
 
-Học sinh có thể trò chuyện với gia sư bằng chính ngôn ngữ của mình trong khi nội dung môn học vẫn hoàn toàn ở ngôn ngữ đích. Hãy hình dung một giáo viên Việt Nam đang giải thích một bài ngữ pháp tiếng Anh bằng tiếng Việt — phần học sinh viết ra và phần được sửa vẫn là tiếng Anh, nhưng quá trình hướng dẫn diễn ra bằng tiếng Việt.
+Plugin cụ thể đầu tiên là **markdown plugin**. Đây là renderer chính của gia sư và thay thế cho cách làm bằng văn bản thuần trước đó, vốn không khả thi cho một buổi học Toán kiểu Socratic.
 
-Stemolly mô hình hóa điều này thành hai thiết lập độc lập:
+| Capability | Detail |
+|---|---|
+| Markdown | Văn xuôi chuẩn, tiêu đề, danh sách |
+| LaTeX math | Được render qua **KaTeX** — cả công thức nội dòng lẫn công thức dạng khối |
+| HTML decoration | Chỉ theo allowlist (danh sách cho phép): `span`, `mark`, `sup`, `sub`, các thuộc tính an toàn — không có `script`, event handler hay `iframe` |
 
-| Thiết lập | Nó điều khiển gì | Ai quyết định |
-|---|---|---|
-| **`comm_lang`** | Ngôn ngữ mà gia sư dùng để nói | Thiết kế chương trình học / phiên học |
-| **Content language** | Ngôn ngữ của học liệu môn học | Lesson brief đã được biên soạn |
+### Render an toàn cho cả hai phía tác giả
 
-Hai thiết lập này độc lập với nhau. Một học sinh Việt Nam học IELTS sẽ có `comm_lang = vi` và content language = `en`. Gia sư hướng dẫn bằng tiếng Việt; mọi bản nháp bài viết và mọi phần sửa lỗi đều ở tiếng Anh.
+Bộ allowlist HTML được chạy qua một sanitizer (bộ làm sạch) kiểu DOMPurify, và nó áp dụng cho **cả** đầu ra của gia sư lẫn nội dung học sinh gửi lên. Tutor LLM là nguồn bán tin cậy; đầu vào của học sinh là nguồn không tin cậy. Các thẻ như `script`, event handler (`onerror`, `onclick`) và `iframe` luôn bị loại bỏ. Các bài kiểm thử TDD cố định hành vi này, và một fitness function (hàm kiểm chuẩn) `G-15` canh giữ nó ở ranh giới mở rộng plugin.
 
-### Trục thứ ba: ngôn ngữ giao diện (`ui_lang`)
+:::note
+Bộ plugin khởi đầu cho MVP là: **markdown** (đầu ra của gia sư), **text-input** (đầu vào nền tảng của học sinh), **formula-input** (học sinh → KaTeX qua trình soạn thảo bảng ký hiệu), **multiple-choice** (tương tác). Các plugin passage và essay-review được dời sang phần nội dung Language.
+:::
 
-Trong hệ thống còn có một ngôn ngữ thứ ba — ngôn ngữ của chính giao diện: nhãn nút bấm, menu, thông báo lỗi. Đó là `ui_lang`, và nó là **một tùy chọn riêng của người dùng**, tách biệt với `comm_lang`.
+---
 
-Hai thứ này rất dễ bị nhập làm một, nhưng bắt buộc phải tách vì hai lý do:
+## Ba trục ngôn ngữ độc lập
 
-1. **`comm_lang` là một biến sư phạm đang được kiểm chứng.** MVP-1 kiểm tra xem việc hướng dẫn bằng tiếng mẹ đẻ của học sinh có cải thiện kết quả hay không. Nếu công tắc đổi ngôn ngữ giao diện lại ghi đè vào `comm_lang`, thì chỉ cần học sinh đổi tùy chọn hiển thị là ngôn ngữ gia sư sẽ âm thầm đổi giữa chừng trong phiên học — làm hỏng dữ liệu thí nghiệm.
-
-2. **Có những nhóm người dùng cần `ui_lang` nhưng không cần `comm_lang`.** Người dùng Console và Admin cần giao diện bằng ngôn ngữ họ chọn, nhưng họ không bao giờ được gia sư hướng dẫn. Họ có `ui_lang` và hoàn toàn không có `comm_lang`.
+Stemolly tách ngôn ngữ thành ba thiết lập độc lập. Chỉ cần trộn lẫn bất kỳ hai thiết lập nào với nhau là hoặc trải nghiệm người dùng sẽ hỏng, hoặc tín hiệu nghiên cứu sẽ bị méo.
 
 ```mermaid
 flowchart TD
-    U["User"]
-    U -->|"ui_lang<br/>(display preference)"| Chrome["Interface chrome<br/>buttons, menus, errors"]
-    U -->|"comm_lang<br/>(curriculum decision)"| Tutor["Tutor speech<br/>coaching & explanations"]
-    U -->|"content language<br/>(lesson property)"| Content["Subject material<br/>texts, exercises, corrections"]
-
-    style Chrome fill:#e8f4f8,stroke:#4a9aba
-    style Tutor fill:#f0f8e8,stroke:#5a9a4a
-    style Content fill:#fdf6e3,stroke:#b8860b
+  User["User account"]
+  User -->|"ui_lang — display preference"| Chrome["Interface chrome<br/>menus, labels, errors"]
+  User -->|"comm_lang — pedagogical variable"| Tutor["Tutor conversation language"]
+  Curriculum["Content / curriculum"]
+  Curriculum -->|"content_lang — property of material"| Material["Subject material<br/>SAT, IELTS, essays"]
 ```
 
-`ui_lang` do người dùng kiểm soát: ngôn ngữ trình duyệt được phát hiện tự động, tiếng Anh là phương án dự phòng, và có công tắc thủ công để người dùng sửa lại nếu hệ thống nhận diện sai. Lựa chọn này được lưu vào phần tùy chọn của họ và sẽ được áp dụng về sau. `comm_lang` không phải là công tắc cho người dùng — đó là quyết định được đưa ra khi biên soạn chương trình học.
+### Ngôn ngữ giao tiếp và ngôn ngữ nội dung
 
----
+Một học sinh Việt Nam có thể nhận giải thích từ gia sư bằng tiếng Việt (`comm_lang = vi`) trong khi toàn bộ học liệu SAT/IELTS và cả phần bài viết do học sinh tự tạo vẫn ở tiếng Anh (`content_lang = en`). Hãy hình dung một giáo viên Việt giải thích một văn bản tiếng Anh bằng tiếng Việt: ngôn ngữ hướng dẫn và ngôn ngữ của môn học là hai thứ khác nhau. `comm_lang` là thiết lập theo từng học sinh hoặc từng phiên; `content_lang` là thuộc tính của nội dung, không phải của học sinh.
 
-## Cách các mảnh ghép nối với nhau
+### Ngôn ngữ giao diện (`ui_lang`) không phải `comm_lang`
 
-Ba hệ thống mô tả ở trên không phải là ba lớp độc lập. Chúng được thiết kế để cùng vận hành như một khối:
+Ngôn ngữ dùng cho nút bấm, menu và thông báo hệ thống là `ui_lang` — một tùy chọn lưu riêng. Bộ chuyển ngôn ngữ giao diện tuyệt đối **không** được ghi vào `comm_lang`.
 
-```mermaid
-flowchart LR
-    LLM["Tutor LLM<br/>(Interface agent)"]
-    STU["Student"]
+Lý do nằm ở tính toàn vẹn của thực nghiệm. `comm_lang` là biến sư phạm mà MVP-1 được dựng lên để kiểm chứng — phần Language dựa trên giả thuyết rằng hướng dẫn bằng tiếng Việt trên nội dung tiếng Anh sẽ cải thiện kết quả học. Nếu học sinh chỉ cần đổi một nút hiển thị mà vô tình đổi luôn ngôn ngữ gia sư, thì treatment của thí nghiệm sẽ thay đổi ngay giữa chừng và dữ liệu xác thực sẽ bị nhiễu.
 
-    subgraph Envelope ["Message envelope { id, author, type, payload }"]
-        MSG["type: open string"]
-    end
+Còn có sự khác biệt về nhóm người dùng: người dùng Console và Admin có `ui_lang` nhưng hoàn toàn không có `comm_lang`, vì họ không bao giờ học với gia sư.
 
-    LLM -->|"emits"| Envelope
-    STU -->|"emits"| Envelope
+| Setting | Who sets it | Default | What it governs |
+|---|---|---|---|
+| `comm_lang` | Chương trình học / ghi danh | Được khóa theo khóa học | Ngôn ngữ gia sư dùng để hướng dẫn |
+| `content_lang` | Tác giả nội dung | Được xác định theo từng bài học | Ngôn ngữ của học liệu môn học |
+| `ui_lang` | Người dùng (phát hiện từ trình duyệt) | Tiếng Anh | Ngôn ngữ của phần giao diện |
 
-    Envelope --> SAN["Sanitizer<br/>(both authors)"]
-    SAN --> REN["Plugin renderer<br/>Markdown + KaTeX"]
-    REN --> UI["Rendered conversation"]
-
-    COMM["comm_lang"] --> LLM
-    UILANG["ui_lang"] --> UI
-    CONTENT["Content language"] --> LLM
-```
-
-Kiểu plugin quyết định renderer nào sẽ chạy. Bộ làm sạch luôn chạy trước mọi renderer, bất kể thông điệp đến từ đâu. Các thiết lập ngôn ngữ đi cùng phiên học nhưng không xuất hiện trong chính envelope — chúng định hình điều gia sư *nói*, chứ không định hình cấu trúc của thông điệp mà gia sư dùng để nói.
+:::caution
+`ui_lang` và `comm_lang` phải được lưu ở hai trường riêng. Một trường "language" dùng chung là phản xạ ban đầu rất tự nhiên — nhưng ở đây lại là lựa chọn sai.
+:::
